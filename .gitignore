@@ -1,0 +1,10 @@
+binary_masks/
+checkpoints/
+*.pt
+*.safetensors
+*.bin
+__pycache__/
+*.pyc
+.vscode/
+.DS_Store
+._*

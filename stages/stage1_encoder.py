@@ -9,6 +9,24 @@ class TerrainEncoder(nn.Module):
     Eref: Frozen DiffusionSat VAE encoder.
     Multiscale terrain feature extraction via forward hooks.
     Fterrain = {F1, F2, F3, F4} — her downblock'tan bir feature map.
+
+
+    TerrainEncoder
+VAE'nin encoder'ını (down_blocks zinciri) alıp her down_block'un çıktısına bir forward hook takıyor. 
+Hook, o katmandan geçen veriyi bir dict'e (self._features) kopyalayıp saklıyor — normalde bu ara çıktılar kaybolur (sadece son çıktı döner), 
+hook sayesinde 4 farklı çözünürlükteki ara temsili yakalıyoruz:
+
+F1: [B,128,256,256] — en yüksek çözünürlük, en "ham"/detaylı
+F2: [B,256,128,128]
+F3: [B,512,64,64] — latent çözünürlükle aynı (64×64)
+F4: [B,512,64,64] — F3 ile aynı shape 
+
+
+VAEEncoder
+encode(): Görüntüyü (Iref/Isyn, 3 kanal) ya da maskeyi (Mc/Ms, 1 kanal → 3'e çoğaltılıp [-1,1]'e çevriliyor) latent'e sıkıştırıyor. 
+Burada da no_grad doğru — aynı sebep, girdi hep ham veri.
+decode() —  Latent'ten görüntüye geri dönüyor. 
+bu fonksiyon train.py'de z0_hat üzerinde çağrılıyor — ve z0_hat, eps_hat'ten (yani UNet'in, yani trainable modüllerin çıktısından) türetiliyor.
     """
     def __init__(self, checkpoint_path=CHECKPOINT_PATH):
         super().__init__()

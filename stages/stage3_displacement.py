@@ -12,6 +12,9 @@ class DisplacementMLP(nn.Module):
     Input: meta [B, 8]
       [cos_az, sin_az, sin_el, cos_el, ccov, copa, h_norm, ccount]
     Output: d [B, 2] — latent uzayda displacement (Δx, Δy)
+
+    DisplacementMLP metadata'dan (sadece ilk 7 boyut: azimuth+elevation+coverage+opacity+height) bir kayma vektörü d=(Δx,Δy) tahmin ediyor.
+    SpatialWarp bulut maskesinin latent temsilini (zc) bu kadar kaydırıyor → Fwarp.
     """
     def __init__(self, hidden_dim=128):
         super().__init__()

@@ -73,6 +73,15 @@ class LCIBPipeline(nn.Module):
         self.terrain_enc = TerrainEncoder(checkpoint_path)
         self.vae_enc     = VAEEncoder(checkpoint_path)
         self.unet = SatUNet.from_pretrained(checkpoint_path, subfolder="unet")
+
+        # DÜZELTME (RAM optimizasyonu): gradient
+        # checkpointing açık — backward sırasında ara aktivasyonları bellekte
+        # tutmak yerine yeniden hesaplıyor. Biraz yavaşlatır ama UNet'in
+        # bellek kullanımını ciddi oranda düşürür. SatUNet zaten
+        # `_supports_gradient_checkpointing = True` ile bunu destekliyor
+        # (bkz. sat_unet.py), o yüzden güvenli bir değişiklik.
+        self.unet.enable_gradient_checkpointing()
+
         self.unet.eval()   # frozen: stokastik katman davranışı (varsa dropout) kapalı kalsın
         for p in self.unet.parameters():
             p.requires_grad = False

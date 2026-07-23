@@ -188,8 +188,7 @@ if __name__ == "__main__":
     Fattn = local_attn(Ffused, F_terrain["F3"])
 
     film = FiLMModulation(fused_channels=4, hidden_dim=64)
-    copa = meta[:, 5]
-    Fout, _, _ = film(copa, Fattn)
+    Fout, _, _ = film(meta, Fattn)
 
     print("Noise scheduler ve UNet yükleniyor...")
     scheduler = DDPMScheduler(num_train_timesteps=1000)

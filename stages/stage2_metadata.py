@@ -6,6 +6,10 @@ class SinusoidalProjection(nn.Module):
     """
     DiffusionSat'taki gibi sinusoidal projeksiyon.
     Scalar değeri d-boyutlu vektöre çevirir.
+
+    9 boyutlu ham metadata vektörünü (meta) tek bir 256-boyutlu özet vektöre (em) sıkıştırıyor. 
+    Her bileşen (azimuth, elevation, coverage, opacity, height, ccount, sstr) ayrı bir sinusoidal projeksiyon + MLP'den geçip toplanıyor.
+    Çıktı em, Stage 8'de EmbeddingProjector üzerinden UNet'in cross-attention girişine besleniyor.
     """
     def __init__(self, dim=256, max_period=10000):
         super().__init__()
@@ -87,6 +91,11 @@ class MetadataEmbedder(nn.Module):
             nn.Linear(embed_dim, embed_dim)
         )
         # YENİ: ccount branch (rapor denklem 17'de zaten isteniyordu)
+        # NOT: cloud_count şu an her zaman 1 (Amir Hoca'nın kararıyla tek-bulutlu
+        # senaryolarla sınırlandırıldı, dataset.py'de sabitlendi). Bu yüzden
+        # mlp_ccount branch'i şu an fonksiyonel olarak "dead weight" — hiçbir
+        # örnek arası varyasyon taşımıyor, öğrenmeye katkısı yok. Mimaride
+        # bilerek tutuluyor: çok bulutlu deneylere geçilirse hazır olsun diye.
         self.mlp_ccount = nn.Sequential(
             nn.Linear(embed_dim, embed_dim),
             nn.SiLU(),

@@ -3,39 +3,73 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
+def _make_group_norm(num_channels, max_groups=8):
+    """
+    GroupNorm için grup sayısını kanal sayısına göre güvenli seçer
+    (num_channels, num_groups'a tam bölünmeli). AMM'deki kanal sayıları
+    (64, 128) için normalde 8 grup kullanılır; küçük/garip bir kanal
+    sayısı gelirse otomatik olarak bölen bir değere düşer.
+    """
+    num_groups = min(max_groups, num_channels)
+    while num_channels % num_groups != 0:
+        num_groups -= 1
+    return nn.GroupNorm(num_groups, num_channels)
+
+
 class ResBlock(nn.Module):
     """
-    Basit residual block: Conv-SiLU-Conv + skip connection.
+    Residual block: Conv-GroupNorm-SiLU-Conv-GroupNorm + skip connection.
     AMM'nin her FPN seviyesinde 2 tanesi kullanılıyor (rapor 2.5.1).
+
+    DÜZELTME (Lmin/Minfo çökme fix'i — kök neden): bu blokta hiç
+    normalization yoktu (sadece Conv+SiLU). Katmanlar derinleştikçe
+    (level1 → level2 → level3_pre, toplam ~6 conv) aktivasyon varyansı
+    kontrolsüz büyüyordu — eğitim başlamadan, sırf rastgele ağırlık
+    init'iyle bile fusion katmanına giren pre-sigmoid değerleri
+    [-10, +28] gibi aşırı aralıklara ulaşıyordu (ölçüldü, bkz. debug
+    testi). sigmoid(±10+) pratikte 0 veya 1'de doyuma uğrar ve o
+    bölgede gradyan ~0'dır (vanishing gradient) — Minfo bir kere öyle
+    bir bölgeye düşünce Lmin'in ufak bir baskısı bile onu kalıcı olarak
+    0'a kilitliyordu; warm-up bunu çözmedi çünkü sorun gradyan baskısının
+    zamanlaması değil, forward pass'in kendisiydi.
+
+    Çözüm: WindowLocalAttention'da (stage 6) daha önce aynı sebeple
+    yapılan düzeltmeyle tutarlı olarak, her conv'dan sonra GroupNorm
+    eklendi. Bu, aktivasyon varyansını katman katman kontrol altında
+    tutar, sigmoid girişini eğitim başında makul (~[-3,+3]) bir aralıkta
+    tutmaya yardımcı olur.
     """
     def __init__(self, channels):
         super().__init__()
         self.conv1 = nn.Conv2d(channels, channels, kernel_size=3, padding=1)
+        self.norm1 = _make_group_norm(channels)
         self.conv2 = nn.Conv2d(channels, channels, kernel_size=3, padding=1)
+        self.norm2 = _make_group_norm(channels)
         self.act   = nn.SiLU()
 
     def forward(self, x):
-        h = self.act(self.conv1(x))
-        h = self.conv2(h)
+        h = self.act(self.norm1(self.conv1(x)))
+        h = self.norm2(self.conv2(h))
         return self.act(x + h)
 
 
 class FPNLevel(nn.Module):
     """
     Tek bir FPN seviyesi: (opsiyonel terrain feature ile concat) →
-    stride-2 conv (downsample) → 2x ResBlock.
+    stride-2 conv (downsample) → GroupNorm → 2x ResBlock.
     """
     def __init__(self, in_channels, terrain_channels, out_channels):
         super().__init__()
         total_in = in_channels + terrain_channels
         self.down = nn.Conv2d(total_in, out_channels, kernel_size=3, stride=2, padding=1)
+        self.norm = _make_group_norm(out_channels)
         self.act  = nn.SiLU()
         self.res1 = ResBlock(out_channels)
         self.res2 = ResBlock(out_channels)
 
     def forward(self, x, terrain_feat):
         h = torch.cat([x, terrain_feat], dim=1)
-        h = self.act(self.down(h))
+        h = self.act(self.norm(self.down(h)))
         h = self.res1(h)
         h = self.res2(h)
         return h
@@ -56,6 +90,18 @@ class AutoMaskModule(nn.Module):
 
     F4 kullanılmıyor: stage1 testinde F3 ile aynı shape'de çıktığı için
     (aynı son downblock'un çıktısı), F3 yeterli terrain bilgisini taşıyor.
+
+    DÜZELTME (Lmin/Minfo çökme fix'i, 2. parça — zero-init fusion):
+    `fusion` katmanı artık ağırlık ve bias'ı SIFIR ile başlatılıyor
+    (ConditioningProjector'daki (stage 8) ControlNet zero-conv
+    konvansiyonuyla aynı mantık). Bunun etkisi: eğitimin ilk adımında
+    pre-sigmoid değeri KESİN OLARAK 0'dır → Minfo = sigmoid(0) = 0.5
+    her yerde. Yani Minfo, ne tam açık (1) ne tam kapalı (0) bir
+    doyum noktasından değil, tam ortadan (gradyanın en güçlü olduğu
+    bölgeden) öğrenmeye başlıyor. GroupNorm fix'iyle birlikte, ilk
+    adımlardaki aşırı pre-sigmoid değerlerini engelleyip Lmin'in
+    kademeli/gerçek bir öğrenme sinyali olarak işlev görmesini sağlaması
+    bekleniyor.
     """
     def __init__(self, terrain_channels=(128, 256, 512), fpn_channels=(64, 128, 128), warp_channels=4):
         super().__init__()
@@ -64,6 +110,7 @@ class AutoMaskModule(nn.Module):
 
         self.level1 = nn.Sequential(
             nn.Conv2d(t1, c1, kernel_size=3, stride=2, padding=1),
+            _make_group_norm(c1),
             nn.SiLU(),
             ResBlock(c1),
             ResBlock(c1),
@@ -73,12 +120,16 @@ class AutoMaskModule(nn.Module):
 
         self.level3_pre = nn.Sequential(
             nn.Conv2d(c2 + t3, c3, kernel_size=3, stride=1, padding=1),
+            _make_group_norm(c3),
             nn.SiLU(),
             ResBlock(c3),
             ResBlock(c3),
         )
 
         self.fusion = nn.Conv2d(c3 + warp_channels, 1, kernel_size=1)
+        # Zero-init: eğitim başında Minfo = sigmoid(0) = 0.5'ten başlasın.
+        nn.init.zeros_(self.fusion.weight)
+        nn.init.zeros_(self.fusion.bias)
 
     def forward(self, Fwarp, F_terrain):
         """
@@ -144,6 +195,7 @@ if __name__ == "__main__":
 
     print(f"\nMinfo shape : {Minfo.shape}")
     print(f"Minfo range : [{Minfo.min():.3f}, {Minfo.max():.3f}]")
+    print(f"Minfo mean  : {Minfo.mean():.3f}  (zero-init sayesinde ~0.500 olmalı)")
     print(f"Ffused shape: {Ffused.shape}")
 
     print("\nStage 5 tamam!")

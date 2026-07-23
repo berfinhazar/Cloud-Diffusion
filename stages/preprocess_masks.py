@@ -7,7 +7,6 @@ LCIB_DATASET_DIR  = "/Volumes/KINGSTON/LCIB_DiffusionSat/lcib_dataset2"
 OUTPUT_DIR        = "/Volumes/KINGSTON/LCIB_DiffusionSat/LCIB_project/binary_masks"
 THRESHOLD         = 10   # 10'dan büyük piksel → 1 (bulut/gölge), küçük → 0 (temiz)
 
-
 def to_binary(arr, threshold=THRESHOLD):
     """Grayscale maskeyi binary'e çevir."""
     return (arr > threshold).astype(np.uint8) * 255  # 0 veya 255

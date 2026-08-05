@@ -25,7 +25,44 @@ from diffusers.models.unet_2d_blocks import (
     get_down_block,
     get_up_block,
 )
+"""
+SatUNet — DiffusionSat'ın diffusers UNet2DConditionModel'i temel alan,
+metadata desteğiyle özelleştirilmiş UNet'i.
 
+GENEL YAPI (standart diffusion UNet, "U" şeklinde simetrik):
+  girdi (zt, gürültülü latent, [B,4,64,64])
+    ↓ conv_in
+    ↓ down_blocks   (64→32→16→8 çözünürlük, kanal artıyor: 320→640→1280→1280)
+    ↓ mid_block     (en dar nokta, 8x8, 1280 kanal — cross-attention en yoğun)
+    ↑ up_blocks     (8→16→32→64, skip connection'larla down_blocks'tan detay alıyor)
+    ↑ conv_out
+  çıktı (eps_hat, tahmini gürültü, [B,4,64,64])
+
+- down_blocks/up_blocks: ilk 3'ü CrossAttnDownBlock2D/CrossAttnUpBlock2D
+  (konv + cross-attention), son biri sade DownBlock2D/UpBlock2D.
+- Skip connection: her down_block çıktısı (res_samples), aynı seviyedeki
+  up_block'a geçiyor — downsample'da kaybolan ince detayı geri taşıyor.
+- timestep (t): sinusoidal projeksiyon + MLP ile emb vektörüne çevrilip
+  her down/mid/up bloğa temb olarak veriliyor ("şu an ne kadar gürültülü").
+
+BİZİM CONDITIONING'İMİZİN GİRDİĞİ 2 NOKTA:
+  1) encoder_hidden_states → cross-attention yoluyla, UNet'in HER
+     seviyesinde etkili. Buraya Stage 2'nin metadata embedding'i (em)
+     giriyor (EmbeddingProjector üzerinden [B,1,1024]).
+  2) mid_block_additional_residual → sadece mid_block çıktısına TOPLAMA
+     şeklinde, tek noktada ama güçlü (ControlNet enjeksiyon mantığı).
+     Buraya Stage 8'in ConditioningProjector çıktısı (Fout'tan türetilmiş,
+     bulut+gölge+terrain sinyali) giriyor.
+
+DiffusionSat'IN KENDİ metadata_embedding'İ (num_metadata=7):
+  Bizim Stage 2 pipeline'ımızla İLGİSİZ — DiffusionSat'ın orijinal görevi
+  için (uydu çekim koordinatı/tarih/GSD gibi) tasarlanmış. Biz bu branch'e
+  sıfır tensor (dummy_native_metadata) veriyoruz, yani etkisiz bırakıyoruz.
+  Kod: for i, md_embed in enumerate(self.metadata_embedding): emb += md_embed(...)
+
+ÖZET: Model, zt + t + (bizim iki koşullandırma kanalımız) verildiğinde,
+zt'ye eklenmiş gerçek gürültüyü (eps) tahmin etmeyi öğreniyor (Ldiff).
+"""
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
 
 

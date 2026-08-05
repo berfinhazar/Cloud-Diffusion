@@ -8,17 +8,7 @@ from pathlib import Path
 from torch.utils.data import Dataset
 import torchvision.transforms as T
 
-# ─── AYARLAR ──────────────────────────────────────────────────
-# GÜNCELLEME: yeni dataset yapısına geçildi (biome bazlı klasörleme).
-#   - lcib_dataset  → lcib_dataset2  (bulutlu; artık her biome kendi
-#     klasöründe: lcib_dataset2/<biome>/output_.../)
-#   - clean_dataset → africa         (bulutsuz; artık her biome kendi
-#     klasöründe: africa/<biome>/{base_name}.png)
-#   - BINARY_MASKS_DIR: mask/shadow'lar output_.../ içinde HAM grayscale
-#     halde duruyor, doğrudan kullanılamıyor. binarize_masks.py bunları
-#     threshold'layıp binary_masks/<biome>/output_.../ altına yazıyor —
-#     bu script'i lcib_dataset2 üzerinde YENİDEN ÇALIŞTIRMAN gerekiyor
-#     (eski binary_masks/ çıktısı eski lcib_dataset'ten üretilmişti).
+
 LCIB_DATASET_DIR  = "/Volumes/KINGSTON/LCIB_DiffusionSat/lcib_dataset2"
 CLEAN_DATASET_DIR = "/Volumes/KINGSTON/LCIB_DiffusionSat/africa"
 BINARY_MASKS_DIR  = "/Volumes/KINGSTON/LCIB_DiffusionSat/LCIB_project/binary_masks"

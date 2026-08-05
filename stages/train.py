@@ -55,7 +55,7 @@ from stage10_train import LCIBPipeline
 from stage9_losses import (
     predict_z0, reconstruction_loss, diffusion_loss,
     preserve_loss, directional_loss, mask_sparsity_loss,
-    elevation_consistency_loss, total_loss,
+    mask_target_loss, elevation_consistency_loss, total_loss,
 )
 
 CHECKPOINT_PATH = "/Volumes/KINGSTON/LCIB_checkpoints/finetune_sd21_sn-satlas-fmow_snr5_md7norm_bs64"
@@ -68,8 +68,8 @@ TRAINABLE_SUBMODULES = [
 
 # CSV/log'daki metrik sırası — hem train hem val satırlarının aynı sütun
 # sayısında kalması için tek yerden yönetiliyor.
-METRIC_KEYS = ["Ldiff", "Lrec", "Lpreserve", "Ldir", "Lmin", "Lele",
-               "Ltotal", "Minfo_mean", "Minfo_max", "Lmin_weight"]
+METRIC_KEYS = ["Ldiff", "Lrec", "Lpreserve", "Ldir", "Lmin", "Lpreserve_mask",
+               "Lele", "Ltotal", "Minfo_mean", "Minfo_max", "Lmin_weight"]
 
 
 def lmin_warmup_factor(global_step, warmup_steps):
@@ -94,9 +94,10 @@ def parse_args():
     ap.add_argument("--log-every", type=int, default=5, help="Kaç step'te bir log basılsın")
     ap.add_argument("--save-every", type=int, default=1, help="Kaç epoch'ta bir checkpoint kaydedilsin")
     ap.add_argument("--seed", type=int, default=42)
-    ap.add_argument("--lambdas", type=float, nargs=6,
-                     default=[1.0, 1.0, 1.0, 1.0, 1.0, 0.025],
-                     help="λ1..λ6: Ldiff Lrec Lpreserve Ldir Lmin Lele")
+    ap.add_argument("--lambdas", type=float, nargs=7,
+                     default=[1.0, 1.0, 1.0, 1.0, 1.0, 0.025, 1.0],
+                     help="λ1..λ7: Ldiff Lrec Lpreserve Ldir Lmin Lele "
+                          "Lpreserve_mask(Minfo — Lmin'e karşı-kuvvet)")
     ap.add_argument("--lmin-warmup-steps", type=int, default=300,
                      help="λ5 (Lmin/AMM sparsity katsayısı) 0'dan hedef "
                           "değerine kaç global step'te doğrusal rampalanacak "
@@ -144,22 +145,31 @@ def compute_losses(out, model, lambdas, scheduler, global_step=0, warmup_steps=0
     z0_hat = predict_z0(out["zt"], out["eps_hat"], out["t"], scheduler.alphas_cumprod)
     Isyn_pred = model.vae_enc.decode(z0_hat)
 
-    Ldiff     = diffusion_loss(out["eps"], out["eps_hat"])
-    Lrec      = reconstruction_loss(Isyn_pred, out["Igt"])
-    Lpreserve = preserve_loss(Isyn_pred, out["Iref"], out["Mc"])
-    Ldir      = directional_loss(out["d"], out["meta"])
-    Lmin      = mask_sparsity_loss(out["Minfo"])
-    Lele      = elevation_consistency_loss(out["d"], out["meta"])
+    Ldiff          = diffusion_loss(out["eps"], out["eps_hat"])
+    Lrec           = reconstruction_loss(Isyn_pred, out["Igt"])
+    Lpreserve      = preserve_loss(Isyn_pred, out["Iref"], out["Mc"])
+    Ldir           = directional_loss(out["d"], out["meta"])
+    Lmin           = mask_sparsity_loss(out["Minfo"])
+    Lpreserve_mask = mask_target_loss(out["Minfo"], out["Mc"], out["d"])
+    Lele           = elevation_consistency_loss(out["d"], out["meta"])
 
     # DÜZELTME (AMM çökme fix'i): λ5'i (Lmin katsayısı) warm-up çarpanıyla
     # ölçekliyoruz. warmup_steps boyunca 0→λ5 rampalanır; bu sürede AMM
     # sadece Ldiff/Lrec/Lpreserve gibi diğer loss'ların dolaylı baskısıyla
     # şekillenir, erken ve karşılıksız bir L1 cezasıyla sıfıra kilitlenmez.
-    l1, l2, l3, l4, l5, l6 = lambdas
-    warmup_factor = lmin_warmup_factor(global_step, warmup_steps)
-    lambdas_eff = (l1, l2, l3, l4, l5 * warmup_factor, l6)
 
-    Ltotal = total_loss(Ldiff, Lrec, Lpreserve, Ldir, Lmin, Lele, lambdas=lambdas_eff)
+
+    l1, l2, l3, l4, l5, l6, l7 = lambdas
+    warmup_factor = lmin_warmup_factor(global_step, warmup_steps)
+    # NOT: l7 (Lpreserve_mask) warm-up'a TABİ DEĞİL. Lmin zaten warm-up
+    # sırasında zayıf/kapalı olduğundan l7'nin baştan tam güçte olması bir
+    # dengesizlik yaratmaz — tersine, AMM'in en baştan "hangi bölgeler
+    # önemli" sinyalini almasını sağlar. Warm-up bitip Lmin tam güce
+    # ulaştığında da artık karşısında sabit bir direnç var.
+    lambdas_eff = (l1, l2, l3, l4, l5 * warmup_factor, l6, l7)
+
+    Ltotal = total_loss(Ldiff, Lrec, Lpreserve, Ldir, Lmin, Lele,
+                         Lpreserve_mask, lambdas=lambdas_eff)
 
     # TANI: Minfo'nun (AMM soft mask) ortalama/maksimum değeri + o anki
     # efektif Lmin katsayısı. Minfo_mean birkaç düzine adım boyunca ~0.00
@@ -172,7 +182,8 @@ def compute_losses(out, model, lambdas, scheduler, global_step=0, warmup_steps=0
 
     parts = {
         "Ldiff": Ldiff.item(), "Lrec": Lrec.item(), "Lpreserve": Lpreserve.item(),
-        "Ldir": Ldir.item(), "Lmin": Lmin.item(), "Lele": Lele.item(),
+        "Ldir": Ldir.item(), "Lmin": Lmin.item(),
+        "Lpreserve_mask": Lpreserve_mask.item(), "Lele": Lele.item(),
         "Ltotal": Ltotal.item(),
         "Minfo_mean": Minfo_mean, "Minfo_max": Minfo_max,
         "Lmin_weight": l5 * warmup_factor,

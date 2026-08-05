@@ -12,23 +12,12 @@ class ConditioningProjector(nn.Module):
     Fout (Stage 7 çıktısı, [B,4,64,64]) SatUNet'in mid_block'una
     (1280 kanal, 8x8 çözünürlük — 64/8=8, 3 stride-2 downsample) enjekte
     edilecek şekilde projekte edilir.
+    3 kademeli stride-2 conv (64→32→16→8 çözünürlük, 4→320→640→1280 kanal) ile downsample, sonra zero_conv (1×1 conv).
 
     ControlNet konvansiyonu: son katman SIFIR init edilir. Böylece eğitim
     başında bu ek conditioning UNet'in pretrained davranışını bozmaz,
     gradyanlar aktığında kademeli olarak devreye girer.
 
-    NOT (Amir Hoca'ya sorulacak açık noktalar):
-    1. Bu sadece mid_block'a injection yapıyor. Rapor Stage 1-7 çıktılarının
-       "UNet'e enjekte edildiğini" söylüyor ama tam mekanizmayı (cross-attention
-       mı, tüm down_block'lara ControlNet-tam injection mı, yoksa sadece
-       mid_block mi) belirtmiyor. Şu an en basit/test edilebilir versiyon.
-    2. SatUNet'in native `metadata` parametresi (num_metadata=7) bizim
-       Stage 2 metadata pipeline'ımızla İLGİSİZ — DiffusionSat'ın kendi
-       görevi için uydu çekim metadata'sı (lat/lon/tarih/GSD). Şu an
-       placeholder sıfır tensor veriyoruz.
-    3. `encoder_hidden_states` (cross-attention) şu an dummy/placeholder.
-       Stage 2 MetadataEmbedder çıktısının ya da Fattn'in buraya token
-       olarak verilmesi daha doğru bir tasarım olabilir — henüz yapılmadı.
     """
     def __init__(self, in_channels=4, mid_channels=1280):
         super().__init__()
@@ -41,8 +30,10 @@ class ConditioningProjector(nn.Module):
             nn.SiLU(),
         )
         self.zero_conv = nn.Conv2d(mid_channels, mid_channels, kernel_size=1)
-        # ControlNet konvansiyonu: sıfır init
-        nn.init.zeros_(self.zero_conv.weight)
+        # DÜZELTME: tam sıfır yerine çok küçük random init — Ldiff'ten Minfo'ya
+        # giden gradyan sinyalinin, bu katman "ısınmayı" beklemeden en baştan
+        # itibaren akmasını sağlamak için (Lmin'e karşı denge kuvvetini güçlendirir)
+        nn.init.normal_(self.zero_conv.weight, mean=0.0, std=1e-4)
         nn.init.zeros_(self.zero_conv.bias)
 
     def forward(self, Fout):

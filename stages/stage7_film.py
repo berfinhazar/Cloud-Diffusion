@@ -9,13 +9,10 @@ class FiLMModulation(nn.Module):
 
     γ, β = MLPfilm(copa, sstr)     (30 — genişletilmiş)
     Fout = γ ⊙ Fattn + β           (31)
-
-    NOT: Rapor denklem 30'da sadece copa var, sstr yok — bu, metodoloji
-    dokümanının önerisiyle Berfin'in onayıyla eklendi (JSON'da gerçek
-    shadow_strength verisi olduğu doğrulandı). Amir Hoca'ya bildirilmeli,
-    rapor bu noktada bilerek genişletildi.
-
-    copa ∈ [0.85, 1.00], sstr ∈ [0, 1] (dataset.py'de meta[:,5] ve meta[:,8]).
+    copa (opacity) ve sstr (shadow strength) metadata'sından γ, β üretip Fattn'i FiLM (Feature-wise Linear Modulation)
+      ile ölçekliyor: Fout = γ ⊙ Fattn + β.
+    Not: Rapor sadece copa diyordu, sstr metodoloji eklentisi olarak eklendi.
+    Girdi: copa ∈ [0.85, 1.00], sstr ∈ [0, 1] (dataset.py'de meta[:,5] ve meta[:,8]).
     """
     def __init__(self, fused_channels=4, hidden_dim=64):
         super().__init__()

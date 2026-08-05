@@ -4,7 +4,12 @@ import torch.nn.functional as F
 
 CHECKPOINT_PATH = "/Volumes/KINGSTON/LCIB_checkpoints/finetune_sd21_sn-satlas-fmow_snr5_md7norm_bs64"
 
-
+"""
+Tüm Stage 1-8'i tek nn.Module'de birleştiriyor. Frozen (TerrainEncoder, VAEEncoder, SatUNet) ve trainable (diğer 7 modül) 
+ayrımını yönetiyor.
+forward(), tüm zinciri (encode → metadata → warp → AMM → attention → FiLM → UNet) tek seferde çalıştırıp 
+loss hesaplamak için gereken ara çıktıları döndürüyor.
+"""
 class EmbeddingProjector(nn.Module):
     """
     YENİ: Stage 2'nin metadata embedding'i (em, [B,256]) daha önce
@@ -44,9 +49,7 @@ class LCIBPipeline(nn.Module):
       - TerrainEncoder, VAEEncoder (zaten rapor gereği frozen)
       - SatUNet (pretrained backbone — ControlNet eğitim paradigmasına
         uygun olarak dondurduk: sadece bizim eklediğimiz conditioning
-        modülleri eğitiliyor, ana model bozulmuyor. Gerçek ölçekli eğitimde
-        GPU'ya geçilince SatUNet'in de fine-tune edilip edilmeyeceği
-        Amir Hoca ile netleştirilmeli.)
+        modülleri eğitiliyor, ana model bozulmuyor.)
 
     TRAINABLE:
       - MetadataEmbedder (Stage 2)
@@ -178,7 +181,7 @@ if __name__ == "__main__":
     from stage9_losses import (
         predict_z0, reconstruction_loss, diffusion_loss,
         preserve_loss, directional_loss, mask_sparsity_loss,
-        elevation_consistency_loss, total_loss,
+        mask_target_loss, elevation_consistency_loss, total_loss,
     )
     from torch.utils.data import DataLoader
     from diffusers import DDPMScheduler
@@ -187,7 +190,7 @@ if __name__ == "__main__":
     # ~40x büyük ölçekte çıkıyordu (latent piksel biriminde ham fark).
     # 0.025 ile başlangıçta diğer loss'larla benzer büyüklüğe geliyor
     # (40 * 0.025 ≈ 1.0). Eğitim ilerledikçe tekrar ayarlanabilir.
-    LAMBDAS = (1.0, 1.0, 1.0, 1.0, 1.0, 0.025)   # λ1..λ6
+    LAMBDAS = (1.0, 1.0, 1.0, 1.0, 1.0, 0.025, 1.0)   # λ1..λ7
 
     print("Dataset yükleniyor...")
     dataset = LCIBDataset()
@@ -216,14 +219,16 @@ if __name__ == "__main__":
         with torch.no_grad():
             Isyn_pred = model.vae_enc.decode(z0_hat)
 
-        Ldiff     = diffusion_loss(out["eps"], out["eps_hat"])
-        Lrec      = reconstruction_loss(Isyn_pred, out["Igt"])
-        Lpreserve = preserve_loss(Isyn_pred, out["Iref"], out["Mc"])
-        Ldir      = directional_loss(out["d"], out["meta"])
-        Lmin      = mask_sparsity_loss(out["Minfo"])
-        Lele      = elevation_consistency_loss(out["d"], out["meta"])
+        Ldiff          = diffusion_loss(out["eps"], out["eps_hat"])
+        Lrec           = reconstruction_loss(Isyn_pred, out["Igt"])
+        Lpreserve      = preserve_loss(Isyn_pred, out["Iref"], out["Mc"])
+        Ldir           = directional_loss(out["d"], out["meta"])
+        Lmin           = mask_sparsity_loss(out["Minfo"])
+        Lpreserve_mask = mask_target_loss(out["Minfo"], out["Mc"], out["d"])
+        Lele           = elevation_consistency_loss(out["d"], out["meta"])
 
-        Ltotal = total_loss(Ldiff, Lrec, Lpreserve, Ldir, Lmin, Lele, lambdas=LAMBDAS)
+        Ltotal = total_loss(Ldiff, Lrec, Lpreserve, Ldir, Lmin, Lele,
+                             Lpreserve_mask, lambdas=LAMBDAS)
 
         Ltotal.backward()
         optimizer.step()

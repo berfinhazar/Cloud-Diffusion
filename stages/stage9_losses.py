@@ -100,6 +100,53 @@ def mask_sparsity_loss(Minfo):
     """
     return Minfo.abs().mean()
 
+# ─── 3.5b Mask Target (Preserve) Loss — Lmin'e karşı-kuvvet ────
+def mask_target_loss(Minfo, Mc, d, f=8.0):
+    """
+    Lpreserve[Minfo] = MSE(Minfo, target)
+
+    Lmin (L1 sparsity, denklem 44) Minfo'yu sürekli sıfıra çekiyor;
+    hiçbir karşı-kuvvet olmadan AMM erken kilitleniyordu (bkz. train.py
+    dosya başı "AMM çökme" notu ve λ5=0 ablation sonucu). Bu terim,
+    Mc'den (bulut/gölge maskesi) türetilmiş bir "önemli bölgeler" hedefi
+    üretip Minfo'yu ona çekerek kalıcı bir denge sağlıyor.
+
+    Hedef üretimi TAMAMEN no_grad — bu bir denetim hedefi, d/Mc için
+    ekstra bir gradyan yolu değil (onlar zaten Ldir/Lele/Lrec üzerinden
+    öğreniyor):
+      1. Mc (image-space, [B,1,H,W]) d*f (image-pixel öteleme) kadar
+         kaydırılıyor — gölgenin düşeceği bölgeyi işaret eder
+      2. Kaydırılmış maskenin |Laplacian|'ı (kenar haritası) alınıyor
+      3. Minfo çözünürlüğüne (latent, örn. 64x64) downsample ediliyor
+      4. Örnek başına max-normalize edilip [0,1]'e çekiliyor
+
+    Minfo: [B, 1, h, w] — AMM çıktısı (soft mask)
+    Mc   : [B, 1, H, W] — image-space bulut maskesi
+    d    : [B, 2]       — Stage 3 latent-pixel displacement
+    f    : VAE downscaling faktörü (latent-pixel → image-pixel)
+    """
+    with torch.no_grad():
+        B, _, H, W = Mc.shape
+        d_img = d.detach() * f   # latent-pixel → image-pixel
+
+        theta = torch.zeros(B, 2, 3, device=Mc.device, dtype=Mc.dtype)
+        theta[:, 0, 0] = 1.0
+        theta[:, 1, 1] = 1.0
+        theta[:, 0, 2] = (2.0 * d_img[:, 0]) / W
+        theta[:, 1, 2] = (2.0 * d_img[:, 1]) / H
+
+        grid = F.affine_grid(theta, Mc.shape, align_corners=False)
+        Mc_shifted = F.grid_sample(Mc, grid, align_corners=False,
+                                    padding_mode="zeros")
+
+        target = _laplacian(Mc_shifted).abs()
+        target = F.interpolate(target, size=Minfo.shape[-2:],
+                                mode="bilinear", align_corners=False)
+
+        target_max = target.amax(dim=(2, 3), keepdim=True).clamp_min(1e-6)
+        target = target / target_max
+
+    return F.mse_loss(Minfo, target)
 
 # ─── 3.6 Elevation Consistency Loss (denklem 45) ────────────────
 def elevation_consistency_loss(d, meta, s=15.0, f=8.0, eps=1e-6):
@@ -125,17 +172,15 @@ def elevation_consistency_loss(d, meta, s=15.0, f=8.0, eps=1e-6):
 
 
 # ─── 3.7 Final Objective (denklem 46) ───────────────────────────
-def total_loss(Ldiff, Lrec, Lpreserve, Ldir, Lmin, Lele,
-               lambdas=(1.0, 1.0, 1.0, 1.0, 1.0, 1.0)):
+def total_loss(Ldiff, Lrec, Lpreserve, Ldir, Lmin, Lele, Lpreserve_mask,
+               lambdas=(1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0)):
     """
-    Ltotal = λ1 Ldiff + λ2 Lrec + λ3 Lpreserve + λ4 Ldir + λ5 Lmin + λ6 Lele
-
-    lambdas: rapor kesin katsayı vermiyor — şimdilik hepsi 1.0,
-    eğitim başladığında tune edilecek (TODO: Amir Hoca ile netleştir).
+    Ltotal = λ1 Ldiff + λ2 Lrec + λ3 Lpreserve + λ4 Ldir + λ5 Lmin
+             + λ6 Lele + λ7 Lpreserve[Minfo]
     """
-    l1, l2, l3, l4, l5, l6 = lambdas
+    l1, l2, l3, l4, l5, l6, l7 = lambdas
     return (l1 * Ldiff + l2 * Lrec + l3 * Lpreserve +
-            l4 * Ldir + l5 * Lmin + l6 * Lele)
+            l4 * Ldir + l5 * Lmin + l6 * Lele + l7 * Lpreserve_mask)
 
 
 # ─── TEST ──────────────────────────────────────────────────────
@@ -222,21 +267,23 @@ if __name__ == "__main__":
     with torch.no_grad():
         Isyn_pred = vae_enc.decode(z0_hat)   # [-1,1] aralığında, Iref/Igt ile aynı normalize
 
-    Ldiff     = diffusion_loss(eps, eps_hat)
-    Lrec      = reconstruction_loss(Isyn_pred, Igt)
-    Lpreserve = preserve_loss(Isyn_pred, Iref, Mc)
-    Ldir      = directional_loss(d, meta)
-    Lmin      = mask_sparsity_loss(Minfo)
-    Lele      = elevation_consistency_loss(d, meta)
+    Ldiff          = diffusion_loss(eps, eps_hat)
+    Lrec           = reconstruction_loss(Isyn_pred, Igt)
+    Lpreserve      = preserve_loss(Isyn_pred, Iref, Mc)
+    Ldir           = directional_loss(d, meta)
+    Lmin           = mask_sparsity_loss(Minfo)
+    Lpreserve_mask = mask_target_loss(Minfo, Mc, d)
+    Lele           = elevation_consistency_loss(d, meta)
 
-    Ltotal = total_loss(Ldiff, Lrec, Lpreserve, Ldir, Lmin, Lele)
+    Ltotal = total_loss(Ldiff, Lrec, Lpreserve, Ldir, Lmin, Lele, Lpreserve_mask)
 
-    print(f"Ldiff     : {Ldiff.item():.4f}")
-    print(f"Lrec      : {Lrec.item():.4f}")
-    print(f"Lpreserve : {Lpreserve.item():.4f}")
-    print(f"Ldir      : {Ldir.item():.4f}")
-    print(f"Lmin      : {Lmin.item():.4f}")
-    print(f"Lele      : {Lele.item():.4f}")
-    print(f"Ltotal    : {Ltotal.item():.4f}")
+    print(f"Ldiff          : {Ldiff.item():.4f}")
+    print(f"Lrec           : {Lrec.item():.4f}")
+    print(f"Lpreserve      : {Lpreserve.item():.4f}")
+    print(f"Ldir           : {Ldir.item():.4f}")
+    print(f"Lmin           : {Lmin.item():.4f}")
+    print(f"Lpreserve_mask : {Lpreserve_mask.item():.4f}")
+    print(f"Lele           : {Lele.item():.4f}")
+    print(f"Ltotal         : {Ltotal.item():.4f}")
 
     print("\nStage 9 (loss functions) tamam!")

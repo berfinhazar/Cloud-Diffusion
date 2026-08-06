@@ -15,9 +15,39 @@ class DisplacementMLP(nn.Module):
 
     DisplacementMLP metadata'dan (sadece ilk 7 boyut: azimuth+elevation+coverage+opacity+height) bir kayma vektörü d=(Δx,Δy) tahmin ediyor.
     SpatialWarp bulut maskesinin latent temsilini (zc) bu d kadar kaydırıyor → Fwarp.
+
+    DÜZELTME (Lmin/Minfo çökme fix'i, 3. parça — displacement sınırlama):
+    d daha önce sınırsız bir ham nn.Linear çıktısıydı (bkz. git geçmişindeki
+    ilk taslak notu — orada zaten tanh + max_shift ile sınırlanmıştı, ama
+    kodda bu sınır hiç uygulanmamıştı). Sınırsız d, eğitim sırasında büyük
+    değerlere ulaşabiliyor; bu da iki ayrı soruna yol açıyor:
+      1) SpatialWarp'ın grid'i zaten [-1,1]'e clamp'leniyor (aşağıda), yani
+         |d| latent'in yarı genişliğini (W/2=32) aştığında Fwarp tamamen
+         doyuma ulaşıp anlamsızlaşıyor.
+      2) Daha kritik: stage9_losses.mask_target_loss, Mc'yi d*f kadar
+         kaydırıp Laplacian/kenar haritası çıkarıyor (Lmin'e karşı-kuvvet
+         olarak eklenen Lpreserve_mask'ın hedefi). |d| yeteri kadar
+         büyüdüğünde (ölçüldü: latent-piksel ~30-40 civarı, img-piksel
+         ~240-320) kaydırılmış bulut çerçevenin tamamen dışına çıkıyor,
+         kenar haritası TAMAMEN sıfırlanıyor, ve Lpreserve_mask sessizce
+         Lmin ile aynı yöne (Minfo→0) dönüyor — tam da karşı-kuvvete en
+         çok ihtiyaç duyulan anda devre dışı kalıyor.
+      Rapor'un kendi Lele formülüne göre (h/((tanθe)·s·f), s=15, f=8) bu
+      büyüklükte kaymalar sıradan/beklenen metadata kombinasyonlarında bile
+      ortaya çıkabiliyor — yani nadir bir uç durum değil.
+    Çözüm: d'yi tanh ile [-max_shift, max_shift] aralığına sınırlıyoruz.
+    max_shift=24 seçildi: hem grid doygunluğundan (32) hem de
+    mask_target_loss'un dejenere olduğu bölgeden (~30+) güvenli marj
+    bırakıyor. NOT: bu, Lele'nin çok düşük güneş açısı / çok yüksek bulut
+    kombinasyonlarında beklediği (>24) değerlere hiç ulaşamayacağı anlamına
+    gelir — Lele o örneklerde asla 0'a inemez. Bu, mevcut latent
+    çözünürlük/AMM tasarımıyla rapor'un fiziksel ölçeğinin (s=15, f=8)
+    tam örtüşmediğini gösteriyor; kalıcı çözüm için Amir Hoca ile
+    netleştirilmeli (TODO).
     """
-    def __init__(self, hidden_dim=128):
+    def __init__(self, hidden_dim=128, max_shift=24.0):
         super().__init__()
+        self.max_shift = max_shift
 
         # 7 boyutlu input: va(2) + ve(2) + ccov(1) + copa(1) + h(1)
         self.mlp = nn.Sequential(
@@ -31,11 +61,11 @@ class DisplacementMLP(nn.Module):
     def forward(self, meta):
         """
         meta: [B, 8]
-        Returns: d [B, 2]
+        Returns: d [B, 2] — |d| <= max_shift (latent piksel)
         """
         # idx 7 (ccount) kullanılmıyor, ilk 7'yi al
-        x = meta[:, :7]   # [B, 7]
-        d = self.mlp(x)   # [B, 2]
+        x = meta[:, :7]                          # [B, 7]
+        d = torch.tanh(self.mlp(x)) * self.max_shift   # [B, 2]
         return d
 
 

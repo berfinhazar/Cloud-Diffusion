@@ -47,6 +47,7 @@ import sys
 import torch
 from torch.utils.data import DataLoader, random_split
 from diffusers import DDPMScheduler
+import torch.nn.functional as F
 
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
@@ -69,7 +70,8 @@ TRAINABLE_SUBMODULES = [
 # CSV/log'daki metrik sırası — hem train hem val satırlarının aynı sütun
 # sayısında kalması için tek yerden yönetiliyor.
 METRIC_KEYS = ["Ldiff", "Lrec", "Lpreserve", "Ldir", "Lmin", "Lpreserve_mask",
-               "Lele", "Ltotal", "Minfo_mean", "Minfo_max", "Lmin_weight"]
+               "Lele", "Ltotal", "Minfo_mean", "Minfo_max",
+               "Minfo_in_cloud", "Minfo_out_cloud", "Lmin_weight"]
 
 
 def lmin_warmup_factor(global_step, warmup_steps):
@@ -95,9 +97,15 @@ def parse_args():
     ap.add_argument("--save-every", type=int, default=1, help="Kaç epoch'ta bir checkpoint kaydedilsin")
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--lambdas", type=float, nargs=7,
-                     default=[1.0, 1.0, 1.0, 1.0, 1.0, 0.025, 1.0],
+                     default=[1.0, 1.0, 1.0, 1.0, 0.25, 0.025, 1.0],
                      help="λ1..λ7: Ldiff Lrec Lpreserve Ldir Lmin Lele "
-                          "Lpreserve_mask(Minfo — Lmin'e karşı-kuvvet)")
+                          "Lpreserve_mask(Minfo — Lmin'e karşı-kuvvet). "
+                          "λ5=0.25 varsayılan (DÜZELTME): λ5=1.0 ile Lmin, "
+                          "mask_target_loss'un karşı-kuvvetine rağmen "
+                          "Minfo'yu sıfıra çökertiyordu (denge formülü: "
+                          "Minfo_denge=target-λ5/(2λ7), λ5=1.0'da negatif "
+                          "çıkıyordu). λ5=0.25 ile 100+ step'lik testte "
+                          "Minfo_in_cloud/out_cloud kalıcı olarak ayrıştı.")
     ap.add_argument("--lmin-warmup-steps", type=int, default=300,
                      help="λ5 (Lmin/AMM sparsity katsayısı) 0'dan hedef "
                           "değerine kaç global step'te doğrusal rampalanacak "
@@ -180,12 +188,23 @@ def compute_losses(out, model, lambdas, scheduler, global_step=0, warmup_steps=0
         Minfo_mean = out["Minfo"].mean().item()
         Minfo_max  = out["Minfo"].max().item()
 
+        # YENİ: mekansal ayrışma tanısı — Minfo bulut bölgesinde mi
+        # yükseliyor, yoksa her yerde eşit mi küçülüyor? mask_target_loss
+        # gerçekten karşı-kuvvet üretiyorsa, in_cloud ile out_cloud
+        # arasında zamanla belirgin bir fark açılması beklenir.
+        Mc_down = F.adaptive_avg_pool2d(out["Mc"], output_size=out["Minfo"].shape[-2:])
+        cloud_region = (Mc_down > 0.1).float()
+        noncloud_region = 1.0 - cloud_region
+        Minfo_in_cloud = (out["Minfo"] * cloud_region).sum() / cloud_region.sum().clamp_min(1)
+        Minfo_out_cloud = (out["Minfo"] * noncloud_region).sum() / noncloud_region.sum().clamp_min(1)
+
     parts = {
         "Ldiff": Ldiff.item(), "Lrec": Lrec.item(), "Lpreserve": Lpreserve.item(),
         "Ldir": Ldir.item(), "Lmin": Lmin.item(),
         "Lpreserve_mask": Lpreserve_mask.item(), "Lele": Lele.item(),
         "Ltotal": Ltotal.item(),
         "Minfo_mean": Minfo_mean, "Minfo_max": Minfo_max,
+        "Minfo_in_cloud": Minfo_in_cloud.item(), "Minfo_out_cloud": Minfo_out_cloud.item(),
         "Lmin_weight": l5 * warmup_factor,
     }
     return Ltotal, parts

@@ -105,20 +105,23 @@ def mask_target_loss(Minfo, Mc, d, f=8.0):
     """
     Lpreserve[Minfo] = MSE(Minfo, target)
 
-    Lmin (L1 sparsity, denklem 44) Minfo'yu sürekli sıfıra çekiyor;
-    hiçbir karşı-kuvvet olmadan AMM erken kilitleniyordu (bkz. train.py
-    dosya başı "AMM çökme" notu ve λ5=0 ablation sonucu). Bu terim,
-    Mc'den (bulut/gölge maskesi) türetilmiş bir "önemli bölgeler" hedefi
-    üretip Minfo'yu ona çekerek kalıcı bir denge sağlıyor.
+    DÜZELTME (v2 — kenar tabanlı hedeften bölge tabanlı hedefe):
+    İlk versiyon hedefi Mc'nin Laplacian'ından (kenar haritası) kuruyordu.
+    Sorun: bir kenar haritası tanım gereği ÇOĞUNLUKLA SIFIR (64x64=4096
+    pikselin sadece küçük bir kısmı bulut sınırında) — yani hedefin kendisi
+    de çoğunlukla ~0'a yakındı. Sonuç: MSE(Minfo, target) çoğu pikselde
+    Minfo'yu AŞAĞI çekiyordu, tıpkı Lmin gibi — gerçek bir karşı-kuvvet
+    değil, Lmin ile aynı yönde birleşen bir baskı oluşmuştu. Bunun kanıtı:
+    gözlemde Lpreserve_mask, Minfo_mean ile BİRLİKTE düşüyordu (0.2449→
+    0.0668, Minfo_mean 0.500→0.257 düşerken) — eğer gerçek bir karşı-kuvvet
+    olsaydı Minfo hedeften uzaklaştıkça Lpreserve_mask ARTMALIYDI.
 
-    Hedef üretimi TAMAMEN no_grad — bu bir denetim hedefi, d/Mc için
-    ekstra bir gradyan yolu değil (onlar zaten Ldir/Lele/Lrec üzerinden
-    öğreniyor):
-      1. Mc (image-space, [B,1,H,W]) d*f (image-pixel öteleme) kadar
-         kaydırılıyor — gölgenin düşeceği bölgeyi işaret eder
-      2. Kaydırılmış maskenin |Laplacian|'ı (kenar haritası) alınıyor
-      3. Minfo çözünürlüğüne (latent, örn. 64x64) downsample ediliyor
-      4. Örnek başına max-normalize edilip [0,1]'e çekiliyor
+    Çözüm: hedefi kenar yerine BÖLGE (bulutun/gölgenin kendisi, iç kısmı
+    dahil) üzerinden kuruyoruz. Bulut örtüsü ccov ∈ [0.10, 0.50] olduğu
+    için hedefin piksel ortalaması da o aralıkta olacak — yani hedef
+    "çoğunlukla sıfır" değil, anlamlı bir alanda sıfırdan belirgin şekilde
+    farklı. Bu, Lmin'in "her yerde sıfıra çek" baskısına karşı gerçek bir
+    direnç sağlar.
 
     Minfo: [B, 1, h, w] — AMM çıktısı (soft mask)
     Mc   : [B, 1, H, W] — image-space bulut maskesi
@@ -139,12 +142,10 @@ def mask_target_loss(Minfo, Mc, d, f=8.0):
         Mc_shifted = F.grid_sample(Mc, grid, align_corners=False,
                                     padding_mode="zeros")
 
-        target = _laplacian(Mc_shifted).abs()
-        target = F.interpolate(target, size=Minfo.shape[-2:],
-                                mode="bilinear", align_corners=False)
-
-        target_max = target.amax(dim=(2, 3), keepdim=True).clamp_min(1e-6)
-        target = target / target_max
+        # DÜZELTME: Laplacian (kenar) yerine doğrudan average pooling —
+        # hedef artık bulutun/gölgenin İÇ bölgesini de kapsıyor, sadece
+        # sınırını değil. Ortalama hedef değeri ~ccov (0.10-0.50) civarı.
+        target = F.adaptive_avg_pool2d(Mc_shifted, output_size=Minfo.shape[-2:])
 
     return F.mse_loss(Minfo, target)
 

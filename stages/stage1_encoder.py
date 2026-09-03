@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 from diffusers import AutoencoderKL
 
-CHECKPOINT_PATH = "/Volumes/KINGSTON/LCIB_checkpoints/finetune_sd21_sn-satlas-fmow_snr5_md7norm_bs64"
+CHECKPOINT_PATH = "/Volumes/KIOXIA/LCIB_checkpoints/finetune_sd21_sn-satlas-fmow_snr5_md7norm_bs64"
 
 class TerrainEncoder(nn.Module):
     """
@@ -156,7 +156,7 @@ class VAEEncoder(nn.Module):
 # ─── TEST — gerçek dataset ile ────────────────────────────────
 if __name__ == "__main__":
     import sys
-    sys.path.append("/Volumes/KINGSTON/LCIB_DiffusionSat/LCIB_project/stages")
+    sys.path.append("/Volumes/KIOXIA/LCIB_DiffusionSat/LCIB_project/stages")
     from dataset import LCIBDataset
     from torch.utils.data import DataLoader
 

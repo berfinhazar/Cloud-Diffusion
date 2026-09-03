@@ -9,9 +9,9 @@ from torch.utils.data import Dataset
 import torchvision.transforms as T
 
 
-LCIB_DATASET_DIR  = "/Volumes/KINGSTON/LCIB_DiffusionSat/lcib_dataset2"
-CLEAN_DATASET_DIR = "/Volumes/KINGSTON/LCIB_DiffusionSat/africa"
-BINARY_MASKS_DIR  = "/Volumes/KINGSTON/LCIB_DiffusionSat/LCIB_project/binary_masks"
+LCIB_DATASET_DIR  = "/Volumes/KIOXIA/LCIB_DiffusionSat/lcib_dataset3"
+CLEAN_DATASET_DIR = "/Volumes/KIOXIA/LCIB_DiffusionSat/africa"
+BINARY_MASKS_DIR  = "/Volumes/KIOXIA/LCIB_DiffusionSat/LCIB_project/binary_masks"
 IMAGE_SIZE        = 512   # VAE 512x512 bekliyor
 
 CLOUD_HEIGHT_MIN, CLOUD_HEIGHT_MAX = 600.0, 3500.0
@@ -46,12 +46,21 @@ def parse_metadata(json_path):
 def encode_metadata(meta):
     """
     [cos_az, sin_az, sin_el, cos_el, ccov, copa, h_norm, ccount_norm, sstr_norm]
+
+    DÜZELTME (90° yön uyuşmazlığı fix'i): va=(cos_az, sin_az) artık simulator.py'nin
+    gölge/güneş yönü için kullandığı GERÇEK formülle ((-sin(az), cos(az)), bkz.
+    create_multi_shadow_layer ve compute_cloud_lighting) eşleşecek şekilde
+    hesaplanıyor. Eskiden (cos(az), sin(az)) kullanılıyordu; bu, simülatörün
+    gerçekte ürettiği gölge yönünden 90° sapıyordu (test_spatialwarp_sign_extended.py
+    ile empirik olarak doğrulandı: ortalama +90.1° fark). Değişken adları
+    (cos_az/sin_az) tensör pozisyonunu korumak için aynı bırakıldı, ama artık
+    simülatörün (-sinθ, cosθ) kuralını taşıyorlar. Amir Hoca onayı ile uygulandı.
     """
     az  = math.radians(meta["sun_azimuth"])
     el  = math.radians(meta["sun_elevation"])
 
-    cos_az = math.cos(az)
-    sin_az = math.sin(az)
+    cos_az = -math.sin(az)   # simulator.py: (-sin(az), cos(az)) yönü, ilk bileşen
+    sin_az = math.cos(az)    # simulator.py: (-sin(az), cos(az)) yönü, ikinci bileşen
     sin_el = math.sin(el)
     cos_el = math.cos(el)
 

@@ -187,7 +187,7 @@ def total_loss(Ldiff, Lrec, Lpreserve, Ldir, Lmin, Lele, Lpreserve_mask,
 # ─── TEST ──────────────────────────────────────────────────────
 if __name__ == "__main__":
     import sys
-    sys.path.append("/Volumes/KINGSTON/LCIB_DiffusionSat/LCIB_project/stages")
+    sys.path.append("/Volumes/KIOXIA/LCIB_DiffusionSat/LCIB_project/stages")
 
     from dataset import LCIBDataset
     from stage1_encoder import TerrainEncoder, VAEEncoder
@@ -200,7 +200,7 @@ if __name__ == "__main__":
     from torch.utils.data import DataLoader
     from diffusers import DDPMScheduler
 
-    CHECKPOINT_PATH = "/Volumes/KINGSTON/LCIB_checkpoints/finetune_sd21_sn-satlas-fmow_snr5_md7norm_bs64"
+    CHECKPOINT_PATH = "/Volumes/KIOXIA/LCIB_checkpoints/finetune_sd21_sn-satlas-fmow_snr5_md7norm_bs64"
 
     dataset = LCIBDataset()
     loader  = DataLoader(dataset, batch_size=2, shuffle=False)

@@ -59,8 +59,8 @@ from stage9_losses import (
     mask_target_loss, elevation_consistency_loss, total_loss,
 )
 
-CHECKPOINT_PATH = "/Volumes/KINGSTON/LCIB_checkpoints/finetune_sd21_sn-satlas-fmow_snr5_md7norm_bs64"
-DEFAULT_SAVE_DIR = "/Volumes/KINGSTON/LCIB_DiffusionSat/LCIB_project/checkpoints"
+CHECKPOINT_PATH = "/Volumes/KIOXIA/LCIB_checkpoints/finetune_sd21_sn-satlas-fmow_snr5_md7norm_bs64"
+DEFAULT_SAVE_DIR = "/Volumes/KIOXIA/LCIB_DiffusionSat/LCIB_project/checkpoints"
 
 TRAINABLE_SUBMODULES = [
     "metadata_embedder", "disp_mlp", "amm",

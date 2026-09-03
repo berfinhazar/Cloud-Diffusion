@@ -3,8 +3,8 @@ import numpy as np
 from PIL import Image
 from pathlib import Path
 
-LCIB_DATASET_DIR  = "/Volumes/KINGSTON/LCIB_DiffusionSat/lcib_dataset2"
-OUTPUT_DIR        = "/Volumes/KINGSTON/LCIB_DiffusionSat/LCIB_project/binary_masks"
+LCIB_DATASET_DIR  = "/Volumes/KIOXIA/LCIB_DiffusionSat/lcib_dataset3"
+OUTPUT_DIR        = "/Volumes/KIOXIA/LCIB_DiffusionSat/LCIB_project/binary_masks"
 THRESHOLD         = 10   # 10'dan büyük piksel → 1 (bulut/gölge), küçük → 0 (temiz)
 
 def to_binary(arr, threshold=THRESHOLD):

@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-CHECKPOINT_PATH = "/Volumes/KINGSTON/LCIB_checkpoints/finetune_sd21_sn-satlas-fmow_snr5_md7norm_bs64"
+CHECKPOINT_PATH = "/Volumes/KIOXIA/LCIB_checkpoints/finetune_sd21_sn-satlas-fmow_snr5_md7norm_bs64"
 
 
 class ConditioningProjector(nn.Module):
@@ -65,7 +65,7 @@ def forward_diffusion(z0, t, alphas_cumprod):
 # ─── TEST ──────────────────────────────────────────────────────
 if __name__ == "__main__":
     import sys
-    sys.path.append("/Volumes/KINGSTON/LCIB_DiffusionSat/LCIB_project/stages")
+    sys.path.append("/Volumes/KIOXIA/LCIB_DiffusionSat/LCIB_project/stages")
 
     from dataset import LCIBDataset
     from stage1_encoder import TerrainEncoder, VAEEncoder

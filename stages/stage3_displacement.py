@@ -106,9 +106,17 @@ class SpatialWarp(nn.Module):
 
         # Displacement ekle (translation)
         # dx → x ekseninde kayma, dy → y ekseninde kayma
+        #
+        # DÜZELTME (SpatialWarp işaret fix'i): grid_sample semantiği
+        # output(x,y) = input(grid(x,y)) olduğundan, base_grid + shift
+        # kullanmak Fwarp(x,y) = zc(x+Δx, y+Δy) üretiyordu — rapor denklem
+        # 22'nin (Fwarp(x,y) = zc(x-Δx, y-Δy)) TAM TERSİ. Bu,
+        # test_spatialwarp_sign_extended.py Bölüm 1 ile empirik olarak
+        # doğrulandı (Δx=+4 verildiğinde gözlenen kayma -4 çıkıyordu).
+        # base_grid'den shift ÇIKARARAK rapor formülüyle eşleştiriyoruz.
         shift = torch.stack([dx, dy], dim=-1)        # [B, 2]
         shift = shift.view(B, 1, 1, 2)               # [B, 1, 1, 2]
-        grid  = base_grid + shift                     # [B, H, W, 2]
+        grid  = base_grid - shift                     # [B, H, W, 2] — rapor eq22: zc(x-Δx, y-Δy)
         grid  = grid.clamp(-1, 1)
 
         # Bilinear sampling ile warp uygula
@@ -124,7 +132,7 @@ class SpatialWarp(nn.Module):
 # ─── TEST ──────────────────────────────────────────────────────
 if __name__ == "__main__":
     import sys
-    sys.path.append("/Volumes/KINGSTON/LCIB_DiffusionSat/LCIB_project/stages")
+    sys.path.append("/Volumes/KIOXIA/LCIB_DiffusionSat/LCIB_project/stages")
     from dataset import LCIBDataset
     from stage1_encoder import VAEEncoder
     from torch.utils.data import DataLoader

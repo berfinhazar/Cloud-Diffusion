@@ -103,7 +103,7 @@ class AutoMaskModule(nn.Module):
     kademeli/gerçek bir öğrenme sinyali olarak işlev görmesini sağlaması
     bekleniyor.
     """
-    def __init__(self, terrain_channels=(128, 256, 512), fpn_channels=(64, 128, 128), warp_channels=4):
+    def __init__(self, terrain_channels=(128, 256, 512), fpn_channels=(64, 128, 128), warp_channels=4, ms_channels=1):
         super().__init__()
         c1, c2, c3 = fpn_channels
         t1, t2, t3 = terrain_channels
@@ -126,18 +126,28 @@ class AutoMaskModule(nn.Module):
             ResBlock(c3),
         )
 
-        self.fusion = nn.Conv2d(c3 + warp_channels, 1, kernel_size=1)
+        # DÜZELTME (Ms entegrasyonu — Seçenek 1, "Her Zaman Girdi"):
+        # simulator.py zaten Ms'i üretiyor, o yüzden AMM'in fusion katmanına
+        # ham hedef gölge maskesini de veriyoruz. Bu, Amir Hoca ile 05.09
+        # görüşmesinde konuşulan iki senaryodan ilki — modelin gölgeyi
+        # DisplacementMLP/Ldir/Lele üzerinden fiziksel olarak çıkarmak yerine
+        # doğrudan maskeden öğrenmesine izin veriyor. Cuma toplantısına kadar
+        # bu senaryoyla sonuç alıp, ardından dropout'lu (Seçenek 2) yaklaşıma
+        # geçilmesi planlanıyor.
+        self.fusion = nn.Conv2d(c3 + warp_channels + ms_channels, 1, kernel_size=1)
         # Zero-init: eğitim başında Minfo = sigmoid(0) = 0.5'ten başlasın.
         nn.init.zeros_(self.fusion.weight)
         nn.init.zeros_(self.fusion.bias)
 
-    def forward(self, Fwarp, F_terrain):
+    def forward(self, Fwarp, F_terrain, Ms):
         """
         Fwarp    : [B, 4, 64, 64]   — Stage 4'ten warp edilmiş cloud latent
         F_terrain: dict {"F1","F2","F3","F4"} — Stage 1 TerrainEncoder çıktısı
           F1: [B, 128, 256, 256]
           F2: [B, 256, 128, 128]
           F3: [B, 512, 64, 64]
+        Ms       : [B, 1, H, W]  — ham (512x512) binary gölge maskesi (dataset.py)
+                   fusion'a girmeden önce latent çözünürlüğe (64x64) indirgenir.
 
         Returns:
             Minfo : [B, 1, 64, 64]  — [0,1] aralığında soft confidence map
@@ -150,8 +160,13 @@ class AutoMaskModule(nn.Module):
         h = torch.cat([h, F3], dim=1)    # [B, c2+t3, 64, 64]
         h = self.level3_pre(h)           # [B, c3, 64, 64]
 
-        h = torch.cat([h, Fwarp], dim=1)  # [B, c3+4, 64, 64]
-        Minfo = torch.sigmoid(self.fusion(h))  # [B, 1, 64, 64]
+        # Ms binary bir maske olduğu için bilinear yerine nearest ile
+        # 64x64'e indirgiyoruz — mask_transform'daki (dataset.py) NEAREST
+        # tercihiyle tutarlı, kenarlarda bulanıklaşma/soft değer üretmiyor.
+        Ms_down = F.interpolate(Ms, size=h.shape[-2:], mode="nearest")
+
+        h = torch.cat([h, Fwarp, Ms_down], dim=1)  # [B, c3+4+1, 64, 64]
+        Minfo = torch.sigmoid(self.fusion(h))       # [B, 1, 64, 64]
 
         Ffused = Fwarp * Minfo  # element-wise gating (denklem 24)
         return Minfo, Ffused
@@ -160,7 +175,7 @@ class AutoMaskModule(nn.Module):
 # ─── TEST ──────────────────────────────────────────────────────
 if __name__ == "__main__":
     import sys
-    sys.path.append("/Volumes/KIOXIA/LCIB_DiffusionSat/LCIB_project/stages")
+    sys.path.append("/Volumes/KINGSTON/LCIB_DiffusionSat/LCIB_project/stages")
     from dataset import LCIBDataset
     from stage1_encoder import TerrainEncoder, VAEEncoder
     from stage3_displacement import DisplacementMLP, SpatialWarp
@@ -172,6 +187,7 @@ if __name__ == "__main__":
 
     Iref = batch["Iref"]   # [2, 3, 512, 512]
     Mc   = batch["Mc"]     # [2, 1, 512, 512]
+    Ms   = batch["Ms"]     # [2, 1, 512, 512]
     meta = batch["meta"]   # [2, 8]
 
     print("Encoderlar yükleniyor...")
@@ -191,7 +207,7 @@ if __name__ == "__main__":
         print(f"{k} shape: {F_terrain[k].shape}")
 
     amm = AutoMaskModule()
-    Minfo, Ffused = amm(Fwarp, F_terrain)
+    Minfo, Ffused = amm(Fwarp, F_terrain, Ms)
 
     print(f"\nMinfo shape : {Minfo.shape}")
     print(f"Minfo range : [{Minfo.min():.3f}, {Minfo.max():.3f}]")

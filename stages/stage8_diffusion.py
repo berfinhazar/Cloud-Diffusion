@@ -87,6 +87,7 @@ if __name__ == "__main__":
     Iref = batch["Iref"]
     Isyn = batch["Isyn"]
     Mc   = batch["Mc"]
+    Ms   = batch["Ms"]
     meta = batch["meta"]
 
     print("Encoderlar yükleniyor...")
@@ -102,8 +103,11 @@ if __name__ == "__main__":
     warp = SpatialWarp()
     Fwarp = warp(zc, d)
 
+    # DÜZELTME: AutoMaskModule artık Ms (gölge maskesi) zorunlu 3. parametre
+    # istiyor (bkz. stage5_automask.py, Ms entegrasyonu) — bu test bloğu
+    # güncellenmemiş kalmıştı, eksik parametre hatası veriyordu.
     amm = AutoMaskModule()
-    _, Ffused = amm(Fwarp, F_terrain)
+    _, Ffused = amm(Fwarp, F_terrain, Ms)
 
     local_attn = WindowLocalAttention(
         fused_channels=4, terrain_channels=512,

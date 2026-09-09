@@ -175,7 +175,7 @@ class AutoMaskModule(nn.Module):
 # ─── TEST ──────────────────────────────────────────────────────
 if __name__ == "__main__":
     import sys
-    sys.path.append("/Volumes/KINGSTON/LCIB_DiffusionSat/LCIB_project/stages")
+    sys.path.append("/Volumes/KIOXIA/LCIB_DiffusionSat/LCIB_project/stages")
     from dataset import LCIBDataset
     from stage1_encoder import TerrainEncoder, VAEEncoder
     from stage3_displacement import DisplacementMLP, SpatialWarp

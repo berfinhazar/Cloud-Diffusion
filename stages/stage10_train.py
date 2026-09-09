@@ -160,7 +160,11 @@ class LCIBPipeline(nn.Module):
 
         # Stage 8 — hem mid_block residual hem de cross-attention artık dolu
         mid_residual = self.cond_projector(Fout)
-        dummy_native_metadata = torch.zeros(B, getattr(self.unet, "num_metadata", 7))
+        # DÜZELTME (MPS/GPU cihaz fix'i): bu tensor da eskiden cihaz belirtmeden
+        # oluşturuluyordu, yani her zaman CPU'da kalıyordu. z0/model artık
+        # MPS'te olabileceği için, SatUNet içindeki linear katmana (md_embed)
+        # girerken "girdi CPU'da ama katman MPS'te" hatası veriyordu.
+        dummy_native_metadata = torch.zeros(B, getattr(self.unet, "num_metadata", 7), device=z0.device)
 
         out = self.unet(
             sample=zt,

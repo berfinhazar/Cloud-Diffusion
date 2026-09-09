@@ -12,10 +12,10 @@ import torch.utils.checkpoint
 from diffusers.configuration_utils import ConfigMixin, register_to_config
 from diffusers.loaders import UNet2DConditionLoadersMixin
 from diffusers.utils import BaseOutput, logging
-from diffusers.models.cross_attention import AttnProcessor
+from diffusers.models.attention_processor import AttnProcessor  # DÜZELTME: diffusers'ın yeni sürümünde bu dosya cross_attention.py'den attention_processor.py'ye taşındı
 from diffusers.models.embeddings import GaussianFourierProjection, TimestepEmbedding, Timesteps
 from diffusers.models.modeling_utils import ModelMixin
-from diffusers.models.unet_2d_blocks import (
+from diffusers.models.unets.unet_2d_blocks import (  # DÜZELTME: diffusers'ın yeni sürümünde bu dosya models/ altından models/unets/ altına taşındı
     CrossAttnDownBlock2D,
     CrossAttnUpBlock2D,
     DownBlock2D,
@@ -262,7 +262,7 @@ class SatUNet(ModelMixin, ConfigMixin, UNet2DConditionLoadersMixin):
                 resnet_act_fn=act_fn,
                 resnet_groups=norm_num_groups,
                 cross_attention_dim=cross_attention_dim,
-                attn_num_head_channels=attention_head_dim[i],
+                num_attention_heads=attention_head_dim[i],  # DÜZELTME: yeni diffusers'ta isim değişti (attn_num_head_channels -> num_attention_heads), değer/anlam aynı
                 downsample_padding=downsample_padding,
                 dual_cross_attention=dual_cross_attention,
                 use_linear_projection=use_linear_projection,
@@ -282,7 +282,7 @@ class SatUNet(ModelMixin, ConfigMixin, UNet2DConditionLoadersMixin):
                 output_scale_factor=mid_block_scale_factor,
                 resnet_time_scale_shift=resnet_time_scale_shift,
                 cross_attention_dim=cross_attention_dim,
-                attn_num_head_channels=attention_head_dim[-1],
+                num_attention_heads=attention_head_dim[-1],  # DÜZELTME: yeni diffusers'ta isim değişti (attn_num_head_channels -> num_attention_heads), değer/anlam aynı
                 resnet_groups=norm_num_groups,
                 dual_cross_attention=dual_cross_attention,
                 use_linear_projection=use_linear_projection,
@@ -296,7 +296,7 @@ class SatUNet(ModelMixin, ConfigMixin, UNet2DConditionLoadersMixin):
                 resnet_act_fn=act_fn,
                 output_scale_factor=mid_block_scale_factor,
                 cross_attention_dim=cross_attention_dim,
-                attn_num_head_channels=attention_head_dim[-1],
+                attention_head_dim=attention_head_dim[-1],  # DÜZELTME: bu sınıfta (Simple varyant) yeni diffusers'ta parametre adı "attention_head_dim" (num_attention_heads değil) — dikkat, diğer 3 çağrıdan farklı
                 resnet_groups=norm_num_groups,
                 resnet_time_scale_shift=resnet_time_scale_shift,
             )
@@ -340,7 +340,7 @@ class SatUNet(ModelMixin, ConfigMixin, UNet2DConditionLoadersMixin):
                 resnet_act_fn=act_fn,
                 resnet_groups=norm_num_groups,
                 cross_attention_dim=cross_attention_dim,
-                attn_num_head_channels=reversed_attention_head_dim[i],
+                num_attention_heads=reversed_attention_head_dim[i],  # DÜZELTME: yeni diffusers'ta isim değişti (attn_num_head_channels -> num_attention_heads), değer/anlam aynı
                 dual_cross_attention=dual_cross_attention,
                 use_linear_projection=use_linear_projection,
                 only_cross_attention=only_cross_attention[i],
@@ -484,9 +484,20 @@ class SatUNet(ModelMixin, ConfigMixin, UNet2DConditionLoadersMixin):
         for module in self.children():
             fn_recursive_set_attention_slice(module, reversed_slice_size)
 
-    def _set_gradient_checkpointing(self, module, value=False):
-        if isinstance(module, (CrossAttnDownBlock2D, DownBlock2D, CrossAttnUpBlock2D, UpBlock2D)):
-            module.gradient_checkpointing = value
+    # DÜZELTME: Bu sınıfın kendi _set_gradient_checkpointing() override'ı
+    # kaldırıldı. Eskiden diffusers, gradient checkpointing'i her alt modül
+    # için ayrı ayrı bu metodu çağırarak (self.apply(...) ile) açıyordu,
+    # bu yüzden imza (module, value=False) şeklindeydi. Yeni diffusers
+    # sürümünde ise base sınıf (ModelMixin), tüm modelin üzerinde TEK SEFERDE
+    # kendi _set_gradient_checkpointing(enable=True, gradient_checkpointing_func=...)
+    # metodunu çağırıyor — farklı bir imza, bu yüzden eski override artık
+    # uyumsuz hale gelip hata veriyordu (enable_gradient_checkpointing() ->
+    # TypeError: got an unexpected keyword argument 'enable').
+    # Base sınıfın kendi implementasyonu zaten aynı işi (gradient_checkpointing
+    # attribute'u olan tüm alt modüllerde bu değeri True yapmak) doğru şekilde
+    # yapıyor, üstüne bir de yeni checkpointing mekanizmasının ihtiyaç duyduğu
+    # _gradient_checkpointing_func'ı da ayarlıyor — bu yüzden override'ı
+    # silmek, onu yeniden yazmaktan daha güvenli ve doğru çözüm.
 
     def forward(
             self,

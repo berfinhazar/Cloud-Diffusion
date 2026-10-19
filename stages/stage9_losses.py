@@ -24,6 +24,41 @@ def predict_z0(zt, eps_hat, t, alphas_cumprod):
     return z0_hat
 
 
+# ─── Gürültü ayarı (scheduler) ve v → ε dönüşümü ────────────────
+def make_scheduler():
+    """
+    Önceden eğitilmiş SatUNet checkpoint'inin scheduler_config.json
+    ayarıyla birebir aynı gürültü planı:
+        beta_schedule   = scaled_linear
+        beta_start/end  = 0.00085 / 0.012
+        prediction_type = v_prediction
+        clip_sample     = False
+    (Eskiden varsayılan DDPMScheduler — linear 0.0001→0.02 — kullanılıyordu;
+    bu, checkpoint'in eğitildiği ayarla uyuşmuyordu.)
+    """
+    from diffusers import DDPMScheduler
+    return DDPMScheduler(
+        num_train_timesteps=1000,
+        beta_start=0.00085,
+        beta_end=0.012,
+        beta_schedule="scaled_linear",
+        prediction_type="v_prediction",
+        clip_sample=False,
+    )
+
+
+def v_to_eps(v, zt, t, alphas_cumprod):
+    """
+    UNet çıktısı v-prediction'dır: v = sqrt(αt) ε - sqrt(1-αt) z0.
+    Raporun formülleri ε̂ üzerinden yazıldığı için v'yi ε̂'a çeviriyoruz:
+        ε̂ = sqrt(αt) v + sqrt(1-αt) zt
+    Böylece Ldiff ve predict_z0 formülleri DEĞİŞMEDEN kalır.
+    """
+    sqrt_at   = alphas_cumprod[t].sqrt().view(-1, 1, 1, 1)
+    sqrt_1_at = (1 - alphas_cumprod[t]).sqrt().view(-1, 1, 1, 1)
+    return sqrt_at * v + sqrt_1_at * zt
+
+
 # ─── 3.1 Reconstruction Loss (denklem 40) ───────────────────────
 def reconstruction_loss(Isyn_pred, Igt):
     """
@@ -135,12 +170,19 @@ def mask_target_loss(Minfo, Mc, d, f=8.0):
         theta = torch.zeros(B, 2, 3, device=Mc.device, dtype=Mc.dtype)
         theta[:, 0, 0] = 1.0
         theta[:, 1, 1] = 1.0
-        theta[:, 0, 2] = (2.0 * d_img[:, 0]) / W
-        theta[:, 1, 2] = (2.0 * d_img[:, 1]) / H
+        # YÖN DÜZELTMESİ: affine_grid/grid_sample'da theta'daki +t öteleme,
+        # İÇERİĞİ -t yönüne kaydırır (output(x) = input(x + t)). SpatialWarp ise
+        # içeriği +d yönüne kaydırıyor (Fwarp(x) = zc(x - d), rapor eq. 22).
+        # İkisinin aynı yöne gitmesi için burada işaret çevriliyor.
+        # (Doğrulama: Fwarp merkez sütunu +6 giderken eski hedef -6 gidiyordu.)
+        theta[:, 0, 2] = -(2.0 * d_img[:, 0]) / W
+        theta[:, 1, 2] = -(2.0 * d_img[:, 1]) / H
 
         grid = F.affine_grid(theta, Mc.shape, align_corners=False)
+        # padding_mode="border": SpatialWarp da boşalan kenarı kenar pikselleriyle
+        # dolduruyor (padding_mode='border'); hedef de Fwarp ile aynı davransın.
         Mc_shifted = F.grid_sample(Mc, grid, align_corners=False,
-                                    padding_mode="zeros")
+                                    padding_mode="border")
 
         # DÜZELTME: Laplacian (kenar) yerine doğrudan average pooling —
         # hedef artık bulutun/gölgenin İÇ bölgesini de kapsıyor, sadece
@@ -198,8 +240,6 @@ if __name__ == "__main__":
     from stage8_diffusion import forward_diffusion, ConditioningProjector
     from sat_unet import SatUNet
     from torch.utils.data import DataLoader
-    from diffusers import DDPMScheduler
-
     CHECKPOINT_PATH = "/Volumes/KIOXIA/LCIB_checkpoints/finetune_sd21_sn-satlas-fmow_snr5_md7norm_bs64"
 
     dataset = LCIBDataset()
@@ -241,7 +281,7 @@ if __name__ == "__main__":
     Fout, _, _ = film(meta, Fattn)
 
     print("Noise scheduler ve UNet yükleniyor...")
-    scheduler = DDPMScheduler(num_train_timesteps=1000)
+    scheduler = make_scheduler()
     B = z0.shape[0]
     t = torch.randint(0, scheduler.config.num_train_timesteps, (B,))
     zt, eps = forward_diffusion(z0, t, scheduler.alphas_cumprod)
@@ -263,7 +303,8 @@ if __name__ == "__main__":
             metadata=dummy_metadata,
             mid_block_additional_residual=mid_residual,
         )
-    eps_hat = out.sample
+    # UNet çıktısı v-prediction → ε̂'a çevir (raporun formülleri ε̂ üzerinden)
+    eps_hat = v_to_eps(out.sample, zt, t, scheduler.alphas_cumprod)
 
     # ─── Stage 9: Loss hesaplama ───
     print("\nLosslar hesaplanıyor...")

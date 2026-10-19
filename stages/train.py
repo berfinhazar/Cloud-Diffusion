@@ -58,6 +58,7 @@ Lmin warm-up:
 
 import argparse
 import csv
+import math
 import os
 import random
 import re
@@ -76,6 +77,7 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 from dataset import LCIBDataset
 from stage10_train import LCIBPipeline
 from stage9_losses import (
+    make_scheduler,
     predict_z0,
     reconstruction_loss,
     diffusion_loss,
@@ -904,7 +906,11 @@ def main():
     log("Model yükleniyor (SatUNet dahil, biraz sürebilir)...")
 
     model = LCIBPipeline(checkpoint_path=CHECKPOINT_PATH)
-    scheduler = DDPMScheduler(num_train_timesteps=1000)
+    # Checkpoint'in eğitildiği gürültü ayarı: scaled_linear + v_prediction
+    scheduler = make_scheduler()
+    log(f"[+] Scheduler: {scheduler.config.beta_schedule}, "
+        f"beta=({scheduler.config.beta_start}, {scheduler.config.beta_end}), "
+        f"prediction_type={scheduler.config.prediction_type}")
 
     # --------------------------------------------------------
     # DEVICE (MPS/CPU)
@@ -948,6 +954,34 @@ def main():
             start_epoch, start_batch, global_step, best_val,
             epoch_loss_sum, epoch_loss_count,
         ) = load_checkpoint(args.resume, model, optimizer, lr_sched)
+
+        # DÜZELTME (learning rate scheduler fix'i — 2. ve asıl kısım):
+        # İlk denemede sadece lr_sched.T_max'ı düzelttik, ama bu YETERSİZ
+        # kaldı (bir önceki çalıştırmada lr=0.00e+00 çıktı). Sebebi:
+        # PyTorch'un CosineAnnealingLR.step() metodu her adımda lr'yi
+        # last_epoch/T_max'tan SIFIRDAN hesaplamıyor — bir önceki lr
+        # değerini alıp bir ORANLA çarpıyor (rekürsif formül). Yani
+        # checkpoint'ten yüklenen optimizer'ın o anki lr'si zaten tam
+        # olarak 0'sa (eski T_max=9000'e göre epoch 0 sonunda öyleydi),
+        # T_max'ı ne yaparsak yapalım "0 çarpı herhangi bir oran = 0"
+        # olduğu için lr bir daha asla 0'dan çıkamıyor.
+        #
+        # Çözüm: optimizer'ın o anki lr'sini, DOĞRU T_max'a göre kapalı
+        # formülle (rekürsif değil) yeniden hesaplayıp doğrudan yazıyoruz,
+        # scheduler'ın iç sayaçlarını da buna göre senkronize ediyoruz.
+        lr_sched.T_max = total_steps
+        for group, base_lr in zip(optimizer.param_groups, lr_sched.base_lrs):
+            group["lr"] = lr_sched.eta_min + (base_lr - lr_sched.eta_min) * (
+                1 + math.cos(math.pi * global_step / total_steps)
+            ) / 2
+        lr_sched.last_epoch = global_step
+        lr_sched._step_count = global_step + 1
+        lr_sched._last_lr = [group["lr"] for group in optimizer.param_groups]
+
+        log(
+            f"[+] Learning rate scheduler düzeltildi: T_max={total_steps}, "
+            f"güncel lr={lr_sched._last_lr[0]:.2e} (güncel --epochs hedefine göre)"
+        )
 
         log("[+] Checkpoint yüklendi.")
         log(f"[+] Epoch: {start_epoch}")

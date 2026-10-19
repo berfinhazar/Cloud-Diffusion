@@ -173,7 +173,10 @@ class LCIBPipeline(nn.Module):
             metadata=dummy_native_metadata,
             mid_block_additional_residual=mid_residual,
         )
-        eps_hat = out.sample
+        # UNet çıktısı v-prediction (checkpoint böyle eğitilmiş) → ε̂'a çevir.
+        # Raporun formülleri (Ldiff, ẑ0) ε̂ üzerinden olduğu için aşağısı değişmiyor.
+        from stage9_losses import v_to_eps
+        eps_hat = v_to_eps(out.sample, zt, t, scheduler.alphas_cumprod)
 
         return {
             "eps": eps, "eps_hat": eps_hat, "zt": zt, "t": t,
@@ -194,7 +197,7 @@ if __name__ == "__main__":
         mask_target_loss, elevation_consistency_loss, total_loss,
     )
     from torch.utils.data import DataLoader
-    from diffusers import DDPMScheduler
+    from stage9_losses import make_scheduler
 
     # DÜZELTME: λ6 (Lele katsayısı) küçültüldü. Lele diğer loss'lardan
     # ~40x büyük ölçekte çıkıyordu (latent piksel biriminde ham fark).
@@ -213,7 +216,7 @@ if __name__ == "__main__":
 
     print("\nModel yükleniyor (biraz sürebilir)...")
     model = LCIBPipeline()
-    scheduler = DDPMScheduler(num_train_timesteps=1000)
+    scheduler = make_scheduler()
 
     optimizer = torch.optim.AdamW(model.trainable_parameters(), lr=1e-4)
 

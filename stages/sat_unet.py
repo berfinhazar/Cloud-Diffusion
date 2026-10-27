@@ -45,14 +45,16 @@ GENEL YAPI (standart diffusion UNet, "U" şeklinde simetrik):
 - timestep (t): sinusoidal projeksiyon + MLP ile emb vektörüne çevrilip
   her down/mid/up bloğa temb olarak veriliyor ("şu an ne kadar gürültülü").
 
-BİZİM CONDITIONING'İMİZİN GİRDİĞİ 2 NOKTA:
-  1) encoder_hidden_states → cross-attention yoluyla, UNet'in HER
-     seviyesinde etkili. Buraya Stage 2'nin metadata embedding'i (em)
-     giriyor (EmbeddingProjector üzerinden [B,1,1024]).
-  2) mid_block_additional_residual → sadece mid_block çıktısına TOPLAMA
-     şeklinde, tek noktada ama güçlü (ControlNet enjeksiyon mantığı).
-     Buraya Stage 8'in ConditioningProjector çıktısı (Fout'tan türetilmiş,
-     bulut+gölge+terrain sinyali) giriyor.
+BİZİM CONDITIONING'İMİZİN GİRDİĞİ NOKTALAR (rapor ile uyumlu):
+  1) time_emb_extra → zaman adımı gömmesine (emb) toplanır; böylece her
+     down/mid/up bloğuna temb olarak dağılır. Buraya Stage 2'nin metadata
+     embedding'i (em) projekte edilerek giriyor (rapor 2.2.3).
+  2) down_block_additional_residuals → skip bağlantılarına (decoder'a giden
+     yol) toplanır; mid_block_additional_residual → mid_block çıkışına
+     toplanır (ControlNet enjeksiyon mantığı). Buraya Stage 8'in
+     ConditioningProjector çıktıları (Fout ve terrain F3'ten türetilmiş
+     bulut+gölge+terrain sinyali) giriyor (rapor 2.6.4 / 2.7.4).
+  encoder_hidden_states → artık sabit sıfır token; metadata buradan taşınmıyor.
 
 DiffusionSat'IN KENDİ metadata_embedding'İ (num_metadata=7):
   Bizim Stage 2 pipeline'ımızla İLGİSİZ — DiffusionSat'ın orijinal görevi
@@ -511,6 +513,7 @@ class SatUNet(ModelMixin, ConfigMixin, UNet2DConditionLoadersMixin):
             cross_attention_kwargs: Optional[Dict[str, Any]] = None,
             down_block_additional_residuals: Optional[Tuple[torch.Tensor]] = None,
             mid_block_additional_residual: Optional[torch.Tensor] = None,
+            time_emb_extra: Optional[torch.Tensor] = None,
             return_dict: bool = True,
     ) -> Union[UNet2DConditionOutput, Tuple]:
         r"""
@@ -603,6 +606,11 @@ class SatUNet(ModelMixin, ConfigMixin, UNet2DConditionLoadersMixin):
             for i, md_embed in enumerate(self.metadata_embedding):
                 md_emb = md_embed(metadata[:, i, :])  # (N, D)
                 emb = emb + md_emb  # (N, D)
+
+        # CUSTOM: ek zaman gomme (rapor 2.2.3: em, zaman adimi gommesine eklenir).
+        # time_emb_extra=None ise davranis orijinal modelle birebir aynidir.
+        if time_emb_extra is not None:
+            emb = emb + time_emb_extra.to(dtype=emb.dtype)
 
         # 2. pre-process
         sample = self.conv_in(sample)

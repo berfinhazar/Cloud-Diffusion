@@ -12,29 +12,29 @@ loss hesaplamak için gereken ara çıktıları döndürüyor.
 """
 class EmbeddingProjector(nn.Module):
     """
-    YENİ: Stage 2'nin metadata embedding'i (em, [B,256]) daha önce
-    hiçbir yere bağlanmıyordu — üretiliyor ama kullanılmıyordu.
+    Stage 2'nin metadata embedding'i (em, [B,256]) rapor 2.2.3'e gore zaman
+    adimi gommesine eklenir. Bu katman em'i UNet'in zaman gommesi boyutuna
+    (time_embed_dim, SD2.1: 1280) projekte eder; sonuc SatUNet.forward'da
+    `emb = emb + time_emb_extra` seklinde toplanir.
 
-    Bu katman em'i UNet'in cross-attention girişine (encoder_hidden_states,
-    cross_attention_dim=1024) uygun hale getirir. Tek token olarak veriyoruz
-    ([B,1,1024]) — rapor bunun için bir token sayısı belirtmiyor, en basit
-    seçenek tek token; birden fazla token (örn. her metadata bileşeni için
-    ayrı token) daha zengin bir conditioning olurdu ama şimdilik basit tutuyoruz.
+    Son katman cok kucuk baslatilir: egitim basinda hazir UNet'in davranisi
+    bozulmaz, bilgi kademeli olarak devreye girer.
     """
-    def __init__(self, embed_dim=256, cross_attention_dim=1024):
+    def __init__(self, embed_dim=256, time_embed_dim=1280):
         super().__init__()
         self.proj = nn.Sequential(
-            nn.Linear(embed_dim, cross_attention_dim),
+            nn.Linear(embed_dim, time_embed_dim),
             nn.SiLU(),
-            nn.Linear(cross_attention_dim, cross_attention_dim),
+            nn.Linear(time_embed_dim, time_embed_dim),
         )
+        nn.init.normal_(self.proj[2].weight, mean=0.0, std=1e-4)
+        nn.init.zeros_(self.proj[2].bias)
 
     def forward(self, em):
         """
-        em: [B, 256] → encoder_hidden_states: [B, 1, 1024]
+        em: [B, 256] → time_emb_extra: [B, time_embed_dim]
         """
-        h = self.proj(em)          # [B, 1024]
-        return h.unsqueeze(1)       # [B, 1, 1024]
+        return self.proj(em)
 
 
 class LCIBPipeline(nn.Module):
@@ -57,8 +57,8 @@ class LCIBPipeline(nn.Module):
       - AutoMaskModule (Stage 5)
       - WindowLocalAttention (Stage 6)
       - FiLMModulation (Stage 7)
-      - ConditioningProjector (Stage 8, mid_block injection)
-      - EmbeddingProjector (YENİ — em'i cross-attention'a bağlıyor)
+      - ConditioningProjector (Stage 8, çok ölçekli skip + mid enjeksiyonu)
+      - EmbeddingProjector (em'i zaman adımı gömmesine bağlıyor, rapor 2.2.3)
     """
     def __init__(self, checkpoint_path=CHECKPOINT_PATH):
         super().__init__()
@@ -99,9 +99,15 @@ class LCIBPipeline(nn.Module):
             d_model=64, num_heads=4, window_size=8
         )
         self.film                = FiLMModulation(fused_channels=4, hidden_dim=64)
-        self.cond_projector     = ConditioningProjector(in_channels=4, mid_channels=1280)
+        cfg = self.unet.config
+        lpb = cfg.layers_per_block
+        lpb = lpb[0] if isinstance(lpb, (list, tuple)) else lpb
+        self.cond_projector     = ConditioningProjector(
+            block_out_channels=tuple(cfg.block_out_channels),
+            layers_per_block=lpb,
+        )
         self.embed_projector    = EmbeddingProjector(
-            embed_dim=256, cross_attention_dim=self.unet.config.cross_attention_dim
+            embed_dim=256, time_embed_dim=cfg.block_out_channels[0] * 4
         )
 
     def trainable_parameters(self):
@@ -112,6 +118,41 @@ class LCIBPipeline(nn.Module):
         for m in modules:
             for p in m.parameters():
                 yield p
+
+    def build_cond(self, Fout, F_terrain, time_emb_extra):
+        """
+        UNet'e verilecek tum conditioning'i tek dict'te toplar:
+          ehs : sabit sifir token (metadata artik buradan tasinmiyor)
+          down: skip baglantilarina eklenecek residual'lar (cok olcekli)
+          mid : mid_block cikisina eklenecek residual
+          temb: zaman adimi gommesine eklenecek em projeksiyonu
+        """
+        down_res, mid_res = self.cond_projector(Fout, F_terrain["F3"])
+        B = Fout.shape[0]
+        ehs = torch.zeros(
+            B, 1, self.unet.config.cross_attention_dim,
+            device=Fout.device, dtype=Fout.dtype,
+        )
+        return {"ehs": ehs, "down": down_res, "mid": mid_res, "temb": time_emb_extra}
+
+    def unet_forward(self, zt, t, cond):
+        """
+        Frozen SatUNet cagrisi (v-prediction ciktisini dondurur).
+        """
+        # DÜZELTME (MPS/GPU cihaz fix'i): SatUNet icindeki md_embed linear katmani
+        # icin dummy metadata model ile ayni cihazda olusturulmali.
+        dummy_native_metadata = torch.zeros(
+            zt.shape[0], getattr(self.unet, "num_metadata", 7), device=zt.device
+        )
+        return self.unet(
+            sample=zt,
+            timestep=t,
+            encoder_hidden_states=cond["ehs"],
+            metadata=dummy_native_metadata,
+            down_block_additional_residuals=cond["down"],
+            mid_block_additional_residual=cond["mid"],
+            time_emb_extra=cond["temb"],
+        ).sample
 
     def forward(self, batch, t=None, scheduler=None):
         """
@@ -132,9 +173,9 @@ class LCIBPipeline(nn.Module):
             zc = self.vae_enc.encode(Mc)
             z0 = self.vae_enc.encode(Igt)
 
-        # Stage 2 — artık gerçekten kullanılıyor
+        # Stage 2 — em zaman adımı gömmesine eklenecek (rapor 2.2.3)
         em = self.metadata_embedder(meta)                  # [B, 256]
-        encoder_hidden_states = self.embed_projector(em)    # [B, 1, 1024]
+        time_emb_extra = self.embed_projector(em)           # [B, time_embed_dim]
 
         # Stage 3-4
         d = self.disp_mlp(meta)
@@ -158,25 +199,13 @@ class LCIBPipeline(nn.Module):
         sqrt_1_at = (1 - scheduler.alphas_cumprod[t]).sqrt().view(-1, 1, 1, 1)
         zt = sqrt_at * z0 + sqrt_1_at * eps
 
-        # Stage 8 — hem mid_block residual hem de cross-attention artık dolu
-        mid_residual = self.cond_projector(Fout)
-        # DÜZELTME (MPS/GPU cihaz fix'i): bu tensor da eskiden cihaz belirtmeden
-        # oluşturuluyordu, yani her zaman CPU'da kalıyordu. z0/model artık
-        # MPS'te olabileceği için, SatUNet içindeki linear katmana (md_embed)
-        # girerken "girdi CPU'da ama katman MPS'te" hatası veriyordu.
-        dummy_native_metadata = torch.zeros(B, getattr(self.unet, "num_metadata", 7), device=z0.device)
-
-        out = self.unet(
-            sample=zt,
-            timestep=t,
-            encoder_hidden_states=encoder_hidden_states,
-            metadata=dummy_native_metadata,
-            mid_block_additional_residual=mid_residual,
-        )
+        # Stage 8 — çok ölçekli enjeksiyon (rapor 2.6.4 / 2.7.4) + em zaman gömmesinde (2.2.3)
+        cond = self.build_cond(Fout, F_terrain, time_emb_extra)
+        v_hat = self.unet_forward(zt, t, cond)
         # UNet çıktısı v-prediction (checkpoint böyle eğitilmiş) → ε̂'a çevir.
         # Raporun formülleri (Ldiff, ẑ0) ε̂ üzerinden olduğu için aşağısı değişmiyor.
         from stage9_losses import v_to_eps
-        eps_hat = v_to_eps(out.sample, zt, t, scheduler.alphas_cumprod)
+        eps_hat = v_to_eps(v_hat, zt, t, scheduler.alphas_cumprod)
 
         return {
             "eps": eps, "eps_hat": eps_hat, "zt": zt, "t": t,

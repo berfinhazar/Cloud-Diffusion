@@ -69,12 +69,12 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from torch.utils.data import DataLoader, random_split, Sampler
+from torch.utils.data import DataLoader, Subset, Sampler
 from diffusers import DDPMScheduler
 
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
-from dataset import LCIBDataset
+from dataset import LCIBDataset, scene_split_indices
 from stage10_train import LCIBPipeline
 from stage9_losses import (
     make_scheduler,
@@ -874,15 +874,20 @@ def main():
     log("Dataset yükleniyor...")
 
     full_dataset = LCIBDataset()
-    n_val = max(1, int(len(full_dataset) * args.val_split))
-    n_train = len(full_dataset) - n_val
-
-    train_set, val_set = random_split(
-        full_dataset, [n_train, n_val],
-        generator=torch.Generator().manual_seed(args.seed),
+    # Sahne bazlı split: aynı sahnenin varyantları aynı tarafta kalır (sızıntı yok).
+    train_idx, val_idx = scene_split_indices(
+        full_dataset, val_split=args.val_split, seed=args.seed
     )
+    train_set = Subset(full_dataset, train_idx)
+    val_set = Subset(full_dataset, val_idx)
+    n_train, n_val = len(train_idx), len(val_idx)
 
-    log(f"Train: {n_train} sample | Val: {n_val} sample")
+    train_scenes = {full_dataset.samples[i]["scene_id"] for i in train_idx}
+    val_scenes = {full_dataset.samples[i]["scene_id"] for i in val_idx}
+    assert not (train_scenes & val_scenes), "Train/val arasında ortak sahne var!"
+
+    log(f"Train: {n_train} sample ({len(train_scenes)} sahne) | "
+        f"Val: {n_val} sample ({len(val_scenes)} sahne) | sahne bazlı split")
 
     # --------------------------------------------------------
     # DETERMINISTIC TRAIN SAMPLER

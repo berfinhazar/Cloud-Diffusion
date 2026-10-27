@@ -1,6 +1,7 @@
 import os
 import json
 import math
+import random
 import torch
 import numpy as np
 from PIL import Image
@@ -198,6 +199,40 @@ class LCIBDataset(Dataset):
             "meta":  meta_vec,
             "name":  s["name"],
         }
+
+
+def scene_split_indices(dataset, val_split=0.1, seed=42):
+    """
+    Sahne (scene_id) bazlı, biome'a göre tabakalı train/val ayrımı.
+
+    Aynı sahnenin tüm varyantları (aynı Iref, farklı cov/op/hash) AYNI tarafta
+    kalır; böylece val, eğitimde hiç görülmemiş sahneleri ölçer (sızıntı yok).
+    Her biome için sahneler seed ile karıştırılır ve o biome'daki örneklerin
+    yaklaşık val_split oranına ulaşana kadar val'e verilir (en az 1 sahne).
+
+    Returns: (train_indices, val_indices) — dataset.samples üzerindeki indeksler
+    """
+    by_biome = {}
+    for idx, s in enumerate(dataset.samples):
+        by_biome.setdefault(s["biome"], {}).setdefault(s["scene_id"], []).append(idx)
+
+    rng = random.Random(seed)
+    train_idx, val_idx = [], []
+    for biome in sorted(by_biome):
+        scenes = by_biome[biome]
+        scene_ids = sorted(scenes)
+        rng.shuffle(scene_ids)
+        n_biome = sum(len(v) for v in scenes.values())
+        target = max(1, int(round(n_biome * val_split)))
+        got = 0
+        for sid in scene_ids:
+            if got < target:
+                val_idx.extend(scenes[sid])
+                got += len(scenes[sid])
+            else:
+                train_idx.extend(scenes[sid])
+
+    return sorted(train_idx), sorted(val_idx)
 
 
 if __name__ == "__main__":

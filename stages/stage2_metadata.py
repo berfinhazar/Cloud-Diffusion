@@ -131,11 +131,20 @@ class MetadataEmbedder(nn.Module):
         ccount = meta[:, 7]
         sstr   = meta[:, 8]
 
-        e_ccov   = self.mlp_ccov(self.sin_proj(ccov))
-        e_copa   = self.mlp_copa(self.sin_proj(copa))
-        e_h      = self.mlp_h(self.sin_proj(h_norm))
-        e_ccount = self.mlp_ccount(self.sin_proj(ccount))
-        e_sstr   = self.mlp_sstr(self.sin_proj(sstr))
+        # Rapor 2.2.3 / DiffusionSat: her skaler alan, sinuzoidal projeksiyondan
+        # ONCE bilinen araligi uzerinden [0, 1000] araligina normalize edilir.
+        # (Sadece em yolunda; dataset.py ve DisplacementMLP/FiLM girdileri degismez.)
+        ccov_s   = (ccov - 0.10) / (0.50 - 0.10) * 1000.0
+        copa_s   = (copa - 0.85) / (1.00 - 0.85) * 1000.0
+        h_s      = h_norm * 1000.0                      # h_norm zaten (h-600)/(3500-600)
+        ccount_s = (ccount - 1.0) / (5.0 - 1.0) * 1000.0  # su an hep 1 -> 0 (sabit)
+        sstr_s   = sstr * 1000.0                         # sstr in [0, 1]
+
+        e_ccov   = self.mlp_ccov(self.sin_proj(ccov_s))
+        e_copa   = self.mlp_copa(self.sin_proj(copa_s))
+        e_h      = self.mlp_h(self.sin_proj(h_s))
+        e_ccount = self.mlp_ccount(self.sin_proj(ccount_s))
+        e_sstr   = self.mlp_sstr(self.sin_proj(sstr_s))
 
         # Toplam embedding (rapor denklem 17 + ccount + sstr eklentisi)
         em = ea + ee + e_ccov + e_copa + e_h + e_ccount + e_sstr

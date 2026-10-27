@@ -1,0 +1,21 @@
+# Cloud-Diffusion - Python dependencies
+# Tested with Python 3.11.9 on macOS (Apple Silicon, MPS backend)
+#
+# Setup:
+#   python3.11 -m venv .venv
+#   source .venv/bin/activate
+#   python -m pip install --upgrade pip
+#   python -m pip install -r requirements.txt
+
+# --- Direct dependencies (imported by stages/*.py) ---
+torch==2.13.0
+torchvision==0.28.0
+diffusers==0.40.0
+numpy==2.4.2
+pillow==12.1.1
+matplotlib==3.10.8
+
+# --- Used indirectly by diffusers (checkpoint loading); pinned for reproducibility ---
+huggingface_hub==1.29.0
+safetensors==0.8.0
+accelerate==1.15.0

@@ -7,41 +7,78 @@ CHECKPOINT_PATH = "/Volumes/KIOXIA/LCIB_checkpoints/finetune_sd21_sn-satlas-fmow
 
 class ConditioningProjector(nn.Module):
     """
-    Stage 8 — GEÇİCİ / PROVISIONAL conditioning injection.
+    Stage 8 - Cok olcekli (ControlNet tarzi) conditioning enjeksiyonu.
 
-    Fout (Stage 7 çıktısı, [B,4,64,64]) SatUNet'in mid_block'una
-    (1280 kanal, 8x8 çözünürlük — 64/8=8, 3 stride-2 downsample) enjekte
-    edilecek şekilde projekte edilir.
-    3 kademeli stride-2 conv (64→32→16→8 çözünürlük, 4→320→640→1280 kanal) ile downsample, sonra zero_conv (1×1 conv).
+    Rapor 2.6.4 / 2.7.4: Fattn / Fout, UNet'in decoder olceklerine enjekte
+    edilir. SatUNet'te decoder'a giden bilgi skip baglantilari uzerinden
+    tasindigi icin, her skip tensorune (down_block_additional_residuals)
+    ve mid_block cikisina (mid_block_additional_residual) bir residual ekliyoruz.
 
-    ControlNet konvansiyonu: son katman SIFIR init edilir. Böylece eğitim
-    başında bu ek conditioning UNet'in pretrained davranışını bozmaz,
-    gradyanlar aktığında kademeli olarak devreye girer.
+    Girdi : Fout [B,4,64,64]   (Stage 7 cikisi: bulut+golge sinyali)
+            F3   [B,512,64,64] (Stage 1 terrain feature, rapor 2.1.2)
+    Cikti : (down_residuals, mid_residual)
+            down_residuals: UNet'in down_block_res_samples sirasiyla, tensor
+              demeti. Sayi/kanal/cozunurluk block_out_channels ve
+              layers_per_block'tan OTOMATIK hesaplanir (SD2.1: 12 adet).
+            mid_residual  : [B, C_son, 8, 8]
 
+    Yapi: kucuk bir ozellik piramidi (64->32->16->8, P kanal) ve her skip icin
+    1x1 "zero conv" (ControlNet konvansiyonu: cok kucuk baslangic, egitim
+    basinda hazir UNet'in davranisi bozulmaz).
     """
-    def __init__(self, in_channels=4, mid_channels=1280):
+    def __init__(self, block_out_channels=(320, 640, 1280, 1280), layers_per_block=2,
+                 in_channels=4, terrain_channels=512, pyramid_channels=128):
         super().__init__()
-        self.net = nn.Sequential(
-            nn.Conv2d(in_channels, 320, kernel_size=3, stride=2, padding=1),
-            nn.SiLU(),
-            nn.Conv2d(320, 640, kernel_size=3, stride=2, padding=1),
-            nn.SiLU(),
-            nn.Conv2d(640, mid_channels, kernel_size=3, stride=2, padding=1),
-            nn.SiLU(),
-        )
-        self.zero_conv = nn.Conv2d(mid_channels, mid_channels, kernel_size=1)
-        # DÜZELTME: tam sıfır yerine çok küçük random init — Ldiff'ten Minfo'ya
-        # giden gradyan sinyalinin, bu katman "ısınmayı" beklemeden en baştan
-        # itibaren akmasını sağlamak için (Lmin'e karşı denge kuvvetini güçlendirir)
-        nn.init.normal_(self.zero_conv.weight, mean=0.0, std=1e-4)
-        nn.init.zeros_(self.zero_conv.bias)
+        P = pyramid_channels
+        n_levels = len(block_out_channels)
+        self.n_levels = n_levels
 
-    def forward(self, Fout):
+        # UNet'in down_block_res_samples sirasi: conv_in cikisi, sonra her
+        # down_block icin layers_per_block resnet cikisi, sonra (son blok haric)
+        # downsample cikisi. Her eleman: (kanal, piramit seviyesi)
+        specs = [(block_out_channels[0], 0)]
+        for i, ch in enumerate(block_out_channels):
+            for _ in range(layers_per_block):
+                specs.append((ch, i))
+            if i < n_levels - 1:
+                specs.append((ch, i + 1))
+        self.skip_specs = specs
+
+        # Seviye 0 (latent cozunurluk): Fout ve terrain (F3) birlestirilir
+        self.in_conv = nn.Conv2d(in_channels, P, kernel_size=3, padding=1)
+        self.terrain_proj = nn.Conv2d(terrain_channels, P, kernel_size=1)
+        self.norm0 = nn.GroupNorm(8, P)
+        self.act = nn.SiLU()
+
+        # Seviye 1..n-1: her biri cozunurlugu yariya indirir
+        self.downs = nn.ModuleList([
+            nn.Sequential(
+                nn.Conv2d(P, P, kernel_size=3, stride=2, padding=1), nn.SiLU(),
+                nn.Conv2d(P, P, kernel_size=3, padding=1), nn.SiLU(),
+            ) for _ in range(n_levels - 1)
+        ])
+
+        self.zero_convs = nn.ModuleList([nn.Conv2d(P, ch, kernel_size=1) for ch, _ in specs])
+        self.mid_zero_conv = nn.Conv2d(P, block_out_channels[-1], kernel_size=1)
+        # Tam sifir yerine cok kucuk random init (onceki tasarimdaki secimle ayni):
+        # gradyan sinyali en bastan akabilsin.
+        for conv in list(self.zero_convs) + [self.mid_zero_conv]:
+            nn.init.normal_(conv.weight, mean=0.0, std=1e-4)
+            nn.init.zeros_(conv.bias)
+
+    def forward(self, Fout, F_terrain_local):
         """
-        Fout: [B, 4, 64, 64] → mid_block_additional_residual: [B, 1280, 8, 8]
+        Fout: [B,4,64,64], F_terrain_local: [B,512,64,64]
+        Returns: (down_residuals: tuple, mid_residual: Tensor)
         """
-        h = self.net(Fout)
-        return self.zero_conv(h)
+        h = self.act(self.norm0(self.in_conv(Fout) + self.terrain_proj(F_terrain_local)))
+        feats = [h]
+        for down in self.downs:
+            h = down(h)
+            feats.append(h)
+        down_res = tuple(zc(feats[lvl]) for zc, (_, lvl) in zip(self.zero_convs, self.skip_specs))
+        mid_res = self.mid_zero_conv(feats[-1])
+        return down_res, mid_res
 
 
 def forward_diffusion(z0, t, alphas_cumprod):
@@ -127,10 +164,10 @@ if __name__ == "__main__":
     zt, eps = forward_diffusion(z0, t, scheduler.alphas_cumprod)
     print(f"zt shape: {zt.shape}, t: {t}")
 
-    # Conditioning projector (Fout → mid_block_additional_residual)
-    projector = ConditioningProjector(in_channels=4, mid_channels=1280)
-    mid_residual = projector(Fout)
-    print(f"mid_block_additional_residual shape: {mid_residual.shape}")  # [2,1280,8,8]
+    # Conditioning projector (Fout + F3 → down/mid residual'lar)
+    projector = ConditioningProjector()
+    down_res, mid_residual = projector(Fout, F_terrain["F3"])
+    print(f"down residual sayısı: {len(down_res)}, mid shape: {mid_residual.shape}")
 
     # SatUNet yükleniyor
     print("\nSatUNet yükleniyor (biraz sürebilir)...")
@@ -147,9 +184,10 @@ if __name__ == "__main__":
             timestep=t,
             encoder_hidden_states=encoder_hidden_states,
             metadata=dummy_metadata,
+            down_block_additional_residuals=down_res,
             mid_block_additional_residual=mid_residual,
         )
-    eps_hat = out.sample
+    eps_hat = out.sample   # NOT: checkpoint v-prediction; bu test sadece sekil kontrolu
     print(f"\neps_hat shape: {eps_hat.shape}")
 
     # Ldiff (denklem 37/41)

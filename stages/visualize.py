@@ -30,11 +30,11 @@ import time
 import numpy as np
 import torch
 import torch.nn.functional as F
-from torch.utils.data import random_split
+from torch.utils.data import Subset
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from dataset import LCIBDataset                                   # noqa: E402
+from dataset import LCIBDataset, scene_split_indices              # noqa: E402
 from stage10_train import LCIBPipeline                            # noqa: E402
 from stage9_losses import predict_z0, v_to_eps, make_scheduler                              # noqa: E402
 from train import CHECKPOINT_PATH, TRAINABLE_SUBMODULES, get_device  # noqa: E402
@@ -54,6 +54,11 @@ def parse_args():
     ap.add_argument("--val-split", type=float, default=0.1, help="train.py ile AYNI olmalı")
     ap.add_argument("--pick-seed", type=int, default=0, help="örnek seçimi + gürültü seed'i")
     ap.add_argument("--skip-ms-test", action="store_true", help="Ms=0 karşılaştırmasını atla")
+    ap.add_argument(
+        "--untrained", action="store_true",
+        help="Checkpoint YÜKLEME: hazır UNet + yeni (eğitilmemiş) conditioning modülleriyle "
+             "çalıştır. Mimari/gürültü ayarı/örnekleyici sağlık kontrolü için.",
+    )
     ap.add_argument(
         "--sdedit-test", action="store_true",
         help="Örnekleyici doğrulama testi: gerçek hedefi t_start'a kadar gürültüleyip "
@@ -85,7 +90,7 @@ def to_gray(m):
 def build_conditioning(model, batch, Ms_override=None):
     """
     LCIBPipeline.forward'taki conditioning zincirinin (noise ve UNet çağrısı
-    hariç) birebir aynısı. Returns: encoder_hidden_states, mid_residual, Minfo.
+    hariç) birebir aynısı. Returns: cond (dict: ehs/down/mid/temb), Minfo.
     """
     Iref, Mc, Ms, meta = batch["Iref"], batch["Mc"], batch["Ms"], batch["meta"]
     if Ms_override is not None:
@@ -95,7 +100,7 @@ def build_conditioning(model, batch, Ms_override=None):
     zc = model.vae_enc.encode(Mc)
 
     em = model.metadata_embedder(meta)
-    ehs = model.embed_projector(em)
+    time_emb_extra = model.embed_projector(em)
 
     d = model.disp_mlp(meta)
     Fwarp = model.warp(zc, d)
@@ -103,12 +108,12 @@ def build_conditioning(model, batch, Ms_override=None):
     Minfo, Ffused = model.amm(Fwarp, F_terrain, Ms)
     Fattn = model.local_attn(Ffused, F_terrain["F3"])
     Fout, _, _ = model.film(meta, Fattn)
-    mid = model.cond_projector(Fout)
-    return ehs, mid, Minfo
+    cond = model.build_cond(Fout, F_terrain, time_emb_extra)
+    return cond, Minfo
 
 
 @torch.no_grad()
-def ddim_sample(model, ehs, mid, alphas_cumprod, z_init, steps, device, t_start=None):
+def ddim_sample(model, cond, alphas_cumprod, z_init, steps, device, t_start=None):
     """
     Deterministik DDIM (eta=0). UNet çıktısı v-prediction; ε'a çevrilip DDIM adımı uygulanır.
     t_start=None: saf gürültüden (t=999) başlar. Değilse z_init'in t_start
@@ -120,14 +125,10 @@ def ddim_sample(model, ehs, mid, alphas_cumprod, z_init, steps, device, t_start=
     ts = np.linspace(0, t_start, steps).round().astype(int)[::-1]
     z = z_init.clone()
     B = z.shape[0]
-    dummy_md = torch.zeros(B, getattr(model.unet, "num_metadata", 7), device=device)
 
     for i, t in enumerate(ts):
         t_tensor = torch.full((B,), int(t), device=device, dtype=torch.long)
-        v = model.unet(
-            sample=z, timestep=t_tensor, encoder_hidden_states=ehs,
-            metadata=dummy_md, mid_block_additional_residual=mid,
-        ).sample
+        v = model.unet_forward(z, t_tensor, cond)
         a_t = float(ac[t])
         eps = (a_t ** 0.5) * v + ((1 - a_t) ** 0.5) * z   # v → ε
         a_prev = float(ac[ts[i + 1]]) if i + 1 < len(ts) else 1.0
@@ -137,31 +138,27 @@ def ddim_sample(model, ehs, mid, alphas_cumprod, z_init, steps, device, t_start=
 
 
 @torch.no_grad()
-def one_step_train_style(model, batch, ehs, mid, scheduler, device, t_val=500):
+def one_step_train_style(model, batch, cond, scheduler, device, t_val=500):
     """Eğitimdeki Lrec hesabının görsel karşılığı: gürültülü HEDEFTEN tek adımda tahmin."""
     z0 = model.vae_enc.encode(batch["Isyn"])
     eps = torch.randn_like(z0)
     t = torch.full((z0.shape[0],), t_val, device=device, dtype=torch.long)
     ac = scheduler.alphas_cumprod
     zt = ac[t].sqrt().view(-1, 1, 1, 1) * z0 + (1 - ac[t]).sqrt().view(-1, 1, 1, 1) * eps
-    dummy_md = torch.zeros(z0.shape[0], getattr(model.unet, "num_metadata", 7), device=device)
-    v_hat = model.unet(
-        sample=zt, timestep=t, encoder_hidden_states=ehs,
-        metadata=dummy_md, mid_block_additional_residual=mid,
-    ).sample
+    v_hat = model.unet_forward(zt, t, cond)
     eps_hat = v_to_eps(v_hat, zt, t, ac)
     z0_hat = predict_z0(zt, eps_hat, t, ac)
     return model.vae_enc.decode(z0_hat)
 
 
 @torch.no_grad()
-def sdedit_denoise(model, batch, ehs, mid, alphas_cumprod, t_start, steps, device, gen):
+def sdedit_denoise(model, batch, cond, alphas_cumprod, t_start, steps, device, gen):
     """Gerçek hedefi t_start'a kadar gürültüle, sonra aynı DDIM ile geri temizle."""
     z0 = model.vae_enc.encode(batch["Isyn"])
     eps = torch.randn(z0.shape, generator=gen).to(device)
     a = float(alphas_cumprod[t_start])
     zt = (a ** 0.5) * z0 + ((1 - a) ** 0.5) * eps
-    z = ddim_sample(model, ehs, mid, alphas_cumprod, zt, steps, device, t_start=t_start)
+    z = ddim_sample(model, cond, alphas_cumprod, zt, steps, device, t_start=t_start)
     return model.vae_enc.decode(z)
 
 
@@ -191,7 +188,7 @@ def run_sdedit_test(args, model, scheduler, chosen, device, ckpt, plt):
             for k, v in sample.items()
         }
         torch.manual_seed(args.pick_seed * 1000 + r)
-        ehs, mid, _ = build_conditioning(model, batch)
+        cond, _ = build_conditioning(model, batch)
         gt = batch["Isyn"]
 
         panels = [(denorm(batch["Iref"]), None), (to_gray(batch["Mc"]), "gray"), (denorm(gt), None)]
@@ -199,7 +196,7 @@ def run_sdedit_test(args, model, scheduler, chosen, device, ckpt, plt):
         for t in t_list:
             steps_t = max(5, int(round(args.steps * t / 999.0)))
             gen = torch.Generator().manual_seed(args.pick_seed * 1000 + r)
-            rec = sdedit_denoise(model, batch, ehs, mid, scheduler.alphas_cumprod,
+            rec = sdedit_denoise(model, batch, cond, scheduler.alphas_cumprod,
                                  t, steps_t, device, gen)
             l1 = (rec - gt).abs().mean().item()
             row[f"L1_t{t}"] = round(l1, 4)
@@ -279,7 +276,7 @@ def run_iref_test(args, model, scheduler, chosen, device, ckpt, plt):
             for k, v in sample.items()
         }
         torch.manual_seed(args.pick_seed * 1000 + r)
-        ehs, mid, _ = build_conditioning(model, batch)
+        cond, _ = build_conditioning(model, batch)
         iref, gt, Mc, Ms = batch["Iref"], batch["Isyn"], batch["Mc"], batch["Ms"]
         cloud = Mc > 0.5
         shadow_only = (Ms > 0.5) & (~cloud)
@@ -301,7 +298,7 @@ def run_iref_test(args, model, scheduler, chosen, device, ckpt, plt):
             eps = torch.randn(z_ref.shape, generator=gen).to(device)
             a = float(scheduler.alphas_cumprod[t])
             zt = (a ** 0.5) * z_ref + ((1 - a) ** 0.5) * eps
-            z = ddim_sample(model, ehs, mid, scheduler.alphas_cumprod, zt, steps_t, device, t_start=t)
+            z = ddim_sample(model, cond, scheduler.alphas_cumprod, zt, steps_t, device, t_start=t)
             with torch.no_grad():
                 rec = model.vae_enc.decode(z)
             recs.append(rec)
@@ -377,17 +374,14 @@ def main():
     device = get_device()
     print(f"[+] Cihaz: {device}")
     print(f"[+] Checkpoint: {args.checkpoint}")
-    if not os.path.exists(args.checkpoint):
+    if not args.untrained and not os.path.exists(args.checkpoint):
         raise FileNotFoundError(f"Checkpoint bulunamadı: {args.checkpoint}")
 
     # --- Dataset + train.py ile AYNI split ---
     full = LCIBDataset()
-    n_val = max(1, int(len(full) * args.val_split))
-    n_train = len(full) - n_val
-    train_set, val_set = random_split(
-        full, [n_train, n_val], generator=torch.Generator().manual_seed(args.seed)
-    )
-    print(f"[+] Train: {n_train} | Val: {n_val}")
+    train_idx, val_idx = scene_split_indices(full, val_split=args.val_split, seed=args.seed)
+    train_set, val_set = Subset(full, train_idx), Subset(full, val_idx)
+    print(f"[+] Train: {len(train_idx)} | Val: {len(val_idx)} (sahne bazlı split)")
 
     rng = random.Random(args.pick_seed)
     chosen = {
@@ -398,13 +392,17 @@ def main():
     # --- Model + ağırlıklar ---
     print("[+] Model yükleniyor (biraz sürebilir)...")
     model = LCIBPipeline(checkpoint_path=CHECKPOINT_PATH)
-    try:
-        ckpt = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
-    except TypeError:
-        ckpt = torch.load(args.checkpoint, map_location="cpu")
-    for name in TRAINABLE_SUBMODULES:
-        getattr(model, name).load_state_dict(ckpt[name])
-    print(f"[+] Ağırlıklar yüklendi (epoch={ckpt.get('epoch')}, global_step={ckpt.get('global_step')})")
+    if args.untrained:
+        ckpt = {"epoch": None, "global_step": "untrained"}
+        print("[+] --untrained: checkpoint yüklenmedi (hazır UNet + rastgele başlangıçlı conditioning modülleri)")
+    else:
+        try:
+            ckpt = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
+        except TypeError:
+            ckpt = torch.load(args.checkpoint, map_location="cpu")
+        for name in TRAINABLE_SUBMODULES:
+            getattr(model, name).load_state_dict(ckpt[name])
+        print(f"[+] Ağırlıklar yüklendi (epoch={ckpt.get('epoch')}, global_step={ckpt.get('global_step')})")
     model = model.to(device).eval()
 
     scheduler = make_scheduler()
@@ -449,23 +447,23 @@ def main():
             name = sample["name"]
 
             torch.manual_seed(args.pick_seed * 1000 + r)
-            ehs, mid, Minfo_on = build_conditioning(model, batch)
+            cond, Minfo_on = build_conditioning(model, batch)
             gen = torch.Generator().manual_seed(args.pick_seed * 1000 + r)
             z_init = torch.randn(1, 4, 64, 64, generator=gen).to(device)
 
-            z_on = ddim_sample(model, ehs, mid, scheduler.alphas_cumprod, z_init, args.steps, device)
+            z_on = ddim_sample(model, cond, scheduler.alphas_cumprod, z_init, args.steps, device)
             with torch.no_grad():
                 gen_on = model.vae_enc.decode(z_on)
 
             if do_ms:
-                ehs0, mid0, Minfo_off = build_conditioning(
+                cond0, Minfo_off = build_conditioning(
                     model, batch, Ms_override=torch.zeros_like(batch["Ms"])
                 )
-                z_off = ddim_sample(model, ehs0, mid0, scheduler.alphas_cumprod, z_init, args.steps, device)
+                z_off = ddim_sample(model, cond0, scheduler.alphas_cumprod, z_init, args.steps, device)
                 with torch.no_grad():
                     gen_off = model.vae_enc.decode(z_off)
 
-            one = one_step_train_style(model, batch, ehs, mid, scheduler, device)
+            one = one_step_train_style(model, batch, cond, scheduler, device)
 
             gt = batch["Isyn"]
             l1_on = (gen_on - gt).abs().mean().item()

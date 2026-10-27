@@ -286,8 +286,8 @@ if __name__ == "__main__":
     t = torch.randint(0, scheduler.config.num_train_timesteps, (B,))
     zt, eps = forward_diffusion(z0, t, scheduler.alphas_cumprod)
 
-    projector = ConditioningProjector(in_channels=4, mid_channels=1280)
-    mid_residual = projector(Fout)
+    projector = ConditioningProjector()
+    down_res, mid_residual = projector(Fout, F_terrain["F3"])
 
     unet = SatUNet.from_pretrained(CHECKPOINT_PATH, subfolder="unet")
     unet.eval()
@@ -301,6 +301,7 @@ if __name__ == "__main__":
             timestep=t,
             encoder_hidden_states=encoder_hidden_states,
             metadata=dummy_metadata,
+            down_block_additional_residuals=down_res,
             mid_block_additional_residual=mid_residual,
         )
     # UNet çıktısı v-prediction → ε̂'a çevir (raporun formülleri ε̂ üzerinden)

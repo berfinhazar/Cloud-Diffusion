@@ -108,6 +108,7 @@ TRAINABLE_SUBMODULES = [
     "film",
     "cond_projector",
     "embed_projector",
+    "zref_proj",
 ]
 
 METRIC_KEYS = [
@@ -578,7 +579,7 @@ def compute_losses(out, model, lambdas, scheduler, global_step=0, warmup_steps=0
 
     Ldiff = diffusion_loss(out["eps"], out["eps_hat"])
     Lrec = reconstruction_loss(Isyn_pred, out["Igt"])
-    Lpreserve = preserve_loss(Isyn_pred, out["Iref"], out["Mc"])
+    Lpreserve = preserve_loss(Isyn_pred, out["Iref"], out["Mc"], out["Ms"])
     Ldir = directional_loss(out["d"], out["meta"])
     Lmin = mask_sparsity_loss(out["Minfo"])
     Lpreserve_mask = mask_target_loss(out["Minfo"], out["Mc"], out["d"])

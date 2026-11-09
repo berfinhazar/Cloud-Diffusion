@@ -95,22 +95,25 @@ def _laplacian(x):
     return F.conv2d(x, kernel, padding=1, groups=C)
 
 
-def preserve_loss(Isyn_pred, Iref, Mc, eps=1e-6):
+def preserve_loss(Isyn_pred, Iref, Mc, Ms, eps=1e-6):
     """
-    Lpreserve = || ∇²Isyn - ∇²Iref ||_1,  Ω ∉ Mc  (bulut dışı bölgeler)
+    Lpreserve = || ∇²Isyn - ∇²Iref ||_1,  Ω ∉ Mc ∪ Ms  (bulut VE gölge dışı bölgeler)
 
     Isyn_pred, Iref: [B, 3, 512, 512]
     Mc             : [B, 1, 512, 512] — binary cloud mask (1=bulut)
+    Ms             : [B, 1, 512, 512] — binary shadow mask (1=gölge)
+
+    Gölge bölgesinde piksel değerleri değişmek ZORUNDA olduğu için o bölge
+    korunma cezasından hariç tutulur.
     """
     lap_pred = _laplacian(Isyn_pred)
     lap_ref  = _laplacian(Iref)
 
-    non_cloud_mask = (1.0 - Mc)          # Ω ∉ Mc
-    non_cloud_mask = non_cloud_mask.expand_as(lap_pred)   # [B,1,H,W] → [B,3,H,W]
+    protect_mask = (1.0 - Mc) * (1.0 - Ms)
+    protect_mask = protect_mask.expand_as(lap_pred)   # [B,1,H,W] → [B,3,H,W]
 
-    diff = (lap_pred - lap_ref).abs() * non_cloud_mask
-    return diff.sum() / (non_cloud_mask.sum() + eps)
-
+    diff = (lap_pred - lap_ref).abs() * protect_mask
+    return diff.sum() / (protect_mask.sum() + eps)
 
 # ─── 3.4 Directional Alignment Loss (denklem 43) ────────────────
 def directional_loss(d, meta, eps=1e-6):
@@ -316,7 +319,7 @@ if __name__ == "__main__":
 
     Ldiff          = diffusion_loss(eps, eps_hat)
     Lrec           = reconstruction_loss(Isyn_pred, Igt)
-    Lpreserve      = preserve_loss(Isyn_pred, Iref, Mc)
+    Lpreserve      = preserve_loss(Isyn_pred, Iref, Mc, Ms)
     Ldir           = directional_loss(d, meta)
     Lmin           = mask_sparsity_loss(Minfo)
     Lpreserve_mask = mask_target_loss(Minfo, Mc, d)

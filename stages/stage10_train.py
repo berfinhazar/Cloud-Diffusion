@@ -59,6 +59,7 @@ class LCIBPipeline(nn.Module):
       - FiLMModulation (Stage 7)
       - ConditioningProjector (Stage 8, çok ölçekli skip + mid enjeksiyonu)
       - EmbeddingProjector (em'i zaman adımı gömmesine bağlıyor, rapor 2.2.3)
+      - zref_proj (z_ref'i em uzayına bağlıyor)
     """
     def __init__(self, checkpoint_path=CHECKPOINT_PATH):
         super().__init__()
@@ -76,6 +77,13 @@ class LCIBPipeline(nn.Module):
         self.terrain_enc = TerrainEncoder(checkpoint_path)
         self.vae_enc     = VAEEncoder(checkpoint_path)
         self.unet = SatUNet.from_pretrained(checkpoint_path, subfolder="unet")
+
+        # SatUNet'in kendi (DiffusionSat uydu metadata'sı için olan) dalını kapat.
+        # Sıfır tensör vermek dalı etkisiz yapmıyordu: sinüzoidal projeksiyonda
+        # cos(0)=1 olduğundan emb'e sabit, sıfır olmayan bir ofset ekleniyordu.
+        # forward() zaten `if self.metadata_embedding is not None` kontrolü yapıyor.
+        self.unet.metadata_embedding = None
+        self.unet.use_metadata = False
 
         # DÜZELTME (RAM optimizasyonu): gradient
         # checkpointing açık — backward sırasında ara aktivasyonları bellekte
@@ -109,11 +117,17 @@ class LCIBPipeline(nn.Module):
         self.embed_projector    = EmbeddingProjector(
             embed_dim=256, time_embed_dim=cfg.block_out_channels[0] * 4
         )
+        # z_ref (terrain latent, [B,4,64,64]) → global pool → em uzayına.
+        # Sıfır init: eğitim başında etkisiz, gradyan geldikçe devreye girer.
+        self.zref_proj = nn.Linear(4, 256)
+        nn.init.zeros_(self.zref_proj.weight)
+        nn.init.zeros_(self.zref_proj.bias)
 
     def trainable_parameters(self):
         modules = [
             self.metadata_embedder, self.disp_mlp, self.amm,
             self.local_attn, self.film, self.cond_projector, self.embed_projector,
+            self.zref_proj,
         ]
         for m in modules:
             for p in m.parameters():
@@ -139,16 +153,10 @@ class LCIBPipeline(nn.Module):
         """
         Frozen SatUNet cagrisi (v-prediction ciktisini dondurur).
         """
-        # DÜZELTME (MPS/GPU cihaz fix'i): SatUNet icindeki md_embed linear katmani
-        # icin dummy metadata model ile ayni cihazda olusturulmali.
-        dummy_native_metadata = torch.zeros(
-            zt.shape[0], getattr(self.unet, "num_metadata", 7), device=zt.device
-        )
         return self.unet(
             sample=zt,
             timestep=t,
             encoder_hidden_states=cond["ehs"],
-            metadata=dummy_native_metadata,
             down_block_additional_residuals=cond["down"],
             mid_block_additional_residual=cond["mid"],
             time_emb_extra=cond["temb"],
@@ -169,12 +177,12 @@ class LCIBPipeline(nn.Module):
         B    = Iref.shape[0]
 
         with torch.no_grad():
-            _, F_terrain = self.terrain_enc(Iref)
+            z_ref, F_terrain = self.terrain_enc(Iref)
             zc = self.vae_enc.encode(Mc)
             z0 = self.vae_enc.encode(Igt)
 
         # Stage 2 — em zaman adımı gömmesine eklenecek (rapor 2.2.3)
-        em = self.metadata_embedder(meta)                  # [B, 256]
+        em = self.metadata_embedder(meta) + self.zref_proj(z_ref.mean(dim=[2, 3]))   # [B, 256]
         time_emb_extra = self.embed_projector(em)           # [B, time_embed_dim]
 
         # Stage 3-4
@@ -210,7 +218,7 @@ class LCIBPipeline(nn.Module):
         return {
             "eps": eps, "eps_hat": eps_hat, "zt": zt, "t": t,
             "d": d, "Minfo": Minfo, "meta": meta,
-            "Iref": Iref, "Igt": Igt, "Mc": Mc, "z0": z0,
+            "Iref": Iref, "Igt": Igt, "Mc": Mc, "Ms": Ms, "z0": z0,
         }
 
 
@@ -263,7 +271,7 @@ if __name__ == "__main__":
 
         Ldiff          = diffusion_loss(out["eps"], out["eps_hat"])
         Lrec           = reconstruction_loss(Isyn_pred, out["Igt"])
-        Lpreserve      = preserve_loss(Isyn_pred, out["Iref"], out["Mc"])
+        Lpreserve      = preserve_loss(Isyn_pred, out["Iref"], out["Mc"], out["Ms"])
         Ldir           = directional_loss(out["d"], out["meta"])
         Lmin           = mask_sparsity_loss(out["Minfo"])
         Lpreserve_mask = mask_target_loss(out["Minfo"], out["Mc"], out["d"])

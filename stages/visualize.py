@@ -96,10 +96,10 @@ def build_conditioning(model, batch, Ms_override=None):
     if Ms_override is not None:
         Ms = Ms_override
 
-    _, F_terrain = model.terrain_enc(Iref)
+    z_ref, F_terrain = model.terrain_enc(Iref)
     zc = model.vae_enc.encode(Mc)
 
-    em = model.metadata_embedder(meta)
+    em = model.metadata_embedder(meta) + model.zref_proj(z_ref.mean(dim=[2, 3]))
     time_emb_extra = model.embed_projector(em)
 
     d = model.disp_mlp(meta)

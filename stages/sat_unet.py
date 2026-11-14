@@ -58,9 +58,14 @@ BİZİM CONDITIONING'İMİZİN GİRDİĞİ NOKTALAR (rapor ile uyumlu):
 
 DiffusionSat'IN KENDİ metadata_embedding'İ (num_metadata=7):
   Bizim Stage 2 pipeline'ımızla İLGİSİZ — DiffusionSat'ın orijinal görevi
-  için (uydu çekim koordinatı/tarih/GSD gibi) tasarlanmış. Biz bu branch'e
-  sıfır tensor (dummy_native_metadata) veriyoruz, yani etkisiz bırakıyoruz.
-  Kod: for i, md_embed in enumerate(self.metadata_embedding): emb += md_embed(...)
+  için (uydu çekim koordinatı/tarih/GSD gibi) tasarlanmış. Bu branch
+  LCIBPipeline.__init__ içinde KAPATILIYOR (self.unet.metadata_embedding = None),
+  yani forward'da bu dal hiç çalışmıyor ve metadata argümanı verilmiyor.
+  (Eskiden sıfır tensor veriyorduk; ama sinüzoidal projeksiyonda cos(0)=1
+  olduğundan bu etkisiz değildi, emb'e sabit sıfır olmayan bir ofset ekliyordu.
+  Dal tamamen kapatıldı; DiffusionSat'ın "metadata yok" durumu da zaten m=0,
+  yani dalın hiç eklenmemesi.)
+  Kod: if self.metadata_embedding is not None: ... (None ise atlanır)
 
 ÖZET: Model, zt + t + (bizim iki koşullandırma kanalımız) verildiğinde,
 zt'ye eklenmiş gerçek gürültüyü (eps) tahmin etmeyi öğreniyor (Ldiff).

@@ -72,6 +72,11 @@ bu fonksiyon train.py'de z0_hat üzerinde çağrılıyor — ve z0_hat, eps_hat'
         with torch.no_grad():
             h     = self.encoder(x)
             z_ref = self.quant_conv(h)
+            # DÜZELTME: AutoencoderKL.quant_conv çıktısı 2*latent_channels = 8
+            # kanaldır (ilk 4 = posterior ortalaması, son 4 = logvar). z_ref'i
+            # [B,4,H/8,W/8] olarak (docstring'deki gibi) döndürmek için sadece
+            # ortalama kısmını alıyoruz — zref_proj (stage10) 4 kanal bekliyor.
+            z_ref = z_ref[:, :4]
             z_ref = z_ref * self.scaling_factor
 
         F_terrain = {
